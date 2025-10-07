@@ -1,0 +1,100 @@
+# Epic Manager Default Configuration
+# Copy this file to config/config.yaml to customize settings
+
+# Instance discovery settings
+discovery:
+  # Base path where KB-LLM instances are located
+  base_path: "/opt"
+
+  # Patterns to identify KB-LLM instances
+  instance_markers:
+    - "docker-compose.dev.yml"
+    - "app/"
+
+  # Instances to exclude from discovery
+  exclude_instances:
+    - "epic-manager"
+
+# Workspace management
+workspace:
+  # Base path for worktrees
+  work_base_path: "/opt/work"
+
+  # Cleanup settings
+  auto_cleanup_completed: true
+  keep_worktrees_days: 7
+
+# Claude Code integration
+claude:
+  # Command to launch Claude Code
+  cli_command: "claude"
+
+  # Default agents to use for different operations
+  agents:
+    epic_analysis: "epic-orchestrator"
+    architecture_planning: "software-architect-planner"
+    issue_analysis: "issue-analyzer"
+    test_writing: "tdd-test-writer"
+    solution_coding: "tdd-solution-coder"
+    completeness_check: "implementation-completeness-verifier"
+    coderabbit_fixes: "pr-coderabbit-fixer"
+    stack_management: "graphite-stack-manager"
+
+# Graphite integration
+graphite:
+  # Graphite CLI command
+  cli_command: "gt"
+
+  # Stack management settings
+  auto_restack: true
+  auto_sync: true
+
+# Review monitoring
+reviews:
+  # Polling interval for CodeRabbit reviews (seconds)
+  poll_interval: 60
+
+  # CodeRabbit username to detect reviews
+  coderabbit_username: "coderabbitai"
+
+  # Auto-create review fix worktrees
+  auto_create_fix_worktrees: true
+
+# GitHub integration
+github:
+  # GitHub CLI command
+  cli_command: "gh"
+
+  # API settings
+  api_timeout: 30
+
+# TUI settings
+tui:
+  # Dashboard refresh interval (seconds)
+  refresh_interval: 5
+
+  # Theme settings
+  theme: "dark"
+
+  # Keyboard shortcuts
+  shortcuts:
+    quit: "q"
+    select_instance: "s"
+    worktrees: "w"
+    review: "r"
+    graphite: "g"
+
+# Logging
+logging:
+  # Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  level: "INFO"
+
+  # Log file path (relative to epic-manager directory)
+  file: "data/logs/epic-manager.log"
+
+  # Log rotation
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+
+  # Format
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

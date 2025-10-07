@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//opt/feature/**)",
+      "Bash(for pr in 571 568 570 574 573 572 569)",
+      "Bash(do echo \"=== PR $pr ===\")",
+      "Bash(gh pr view:*)",
+      "Bash(done)",
+      "Read(//opt/work/feature-epic-558/issue-566/**)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh pr list:*)",
+      "Read(//opt/**)",
+      "Bash(git worktree:*)"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "outputStyle": "yaml"
+}
