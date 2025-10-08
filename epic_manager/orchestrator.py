@@ -7,6 +7,7 @@ Focuses on core functionality: analyze GitHub epics, start workflows, track stat
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
@@ -18,6 +19,7 @@ from .models import EpicPlan, WorkflowResult
 from .claude_automation import ClaudeSessionManager
 from .workspace_manager import WorkspaceManager
 from .review_monitor import ReviewMonitor
+from .config import Constants
 
 console = Console()
 
@@ -64,13 +66,21 @@ class EpicOrchestrator:
     across isolated worktrees with proper dependency handling.
     """
 
-    def __init__(self, state_dir: str = "data/state") -> None:
+    def __init__(self, state_dir: str = "data/state", instance_name: Optional[str] = None) -> None:
         """Initialize epic orchestrator.
 
         Args:
-            state_dir: Directory for storing epic state files
+            state_dir: Directory for storing epic state files (used when instance_name not provided)
+            instance_name: Name of the KB-LLM instance. If provided, state is stored in
+                          /opt/{instance_name}/.epic-mgr/state/ instead of state_dir
         """
-        self.state_dir = Path(state_dir)
+        if instance_name:
+            # Store state in instance's hidden .epic-mgr directory
+            self.state_dir = Path(f"/opt/{instance_name}/.epic-mgr/state")
+        else:
+            # Use provided state_dir (for tests or backward compatibility)
+            self.state_dir = Path(state_dir)
+
         self.state_dir.mkdir(exist_ok=True, parents=True)
         self.workspace_mgr = WorkspaceManager()
 
@@ -89,15 +99,24 @@ class EpicOrchestrator:
         claude_mgr = ClaudeSessionManager()
         instance_path = Path(f"/opt/{instance_name}")
 
-        # Ask Claude for JSON plan
-        plan_json = await claude_mgr.get_epic_plan(instance_path, epic_number)
+        # Ask Claude for JSON plan using centralized prompt
+        plan_json = await claude_mgr.get_epic_plan(instance_path, epic_number, instance_name)
+
+        # Debug: Show what JSON we received
+        console.print(f"[dim]Received JSON response ({len(plan_json)} chars)[/dim]")
 
         # Parse and save
-        plan = EpicPlan.from_json(plan_json)
-        self._save_plan(plan)
+        try:
+            plan = EpicPlan.from_json(plan_json)
+            self._save_plan(plan)
 
-        console.print(f"[blue]Epic plan created with {len(plan.issues)} issues in {len(plan.parallelization)} phases[/blue]")
-        return plan
+            console.print(f"[blue]Epic plan created with {len(plan.issues)} issues in {len(plan.parallelization)} phases[/blue]")
+            return plan
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            console.print(f"[red]Failed to parse epic plan JSON: {e}[/red]")
+            console.print("[yellow]JSON response:[/yellow]")
+            console.print(plan_json[:500])  # Show first 500 chars
+            raise
 
     def start_epic(self, epic_number: int) -> bool:
         """Start epic development workflow.
@@ -240,17 +259,22 @@ class EpicOrchestrator:
     async def start_development(
         self,
         plan: EpicPlan,
-        worktrees: Dict[int, Path]
+        worktrees: Dict[int, Path],
+        existing_prs: Optional[Dict[int, int]] = None
     ) -> Dict[int, WorkflowResult]:
         """Launch TDD workflows respecting dependency phases.
 
         Args:
             plan: Epic plan with phase information
             worktrees: Mapping of issue_number -> worktree_path
+            existing_prs: Optional mapping of issue_number -> pr_number for already completed issues
 
         Returns:
             Dictionary mapping issue_number -> WorkflowResult
         """
+        if existing_prs is None:
+            existing_prs = {}
+
         claude_mgr = ClaudeSessionManager()
         results = {}
 
@@ -259,20 +283,30 @@ class EpicOrchestrator:
             issues_in_phase = plan.get_issues_for_phase(phase_name)
             console.print(f"[green]Phase {phase_name}: {[i.number for i in issues_in_phase]}[/green]")
 
-            # Issues within phase run in parallel
-            phase_tasks = [
-                (worktrees[issue.number], issue.number)
-                for issue in issues_in_phase
-                if issue.number in worktrees
-            ]
+            # Filter out issues that already have PRs
+            phase_tasks = []
+            for issue in issues_in_phase:
+                if issue.number in worktrees:
+                    if issue.number in existing_prs:
+                        console.print(f"[blue]  Issue {issue.number} already has PR #{existing_prs[issue.number]}, skipping[/blue]")
+                        # Create a success result for the skipped issue
+                        results[issue.number] = WorkflowResult(
+                            issue_number=issue.number,
+                            success=True,
+                            duration_seconds=0.0,
+                            pr_number=existing_prs[issue.number]
+                        )
+                    else:
+                        console.print(f"[yellow]  Issue {issue.number} needs TDD workflow[/yellow]")
+                        phase_tasks.append((worktrees[issue.number], issue.number))
 
             if not phase_tasks:
-                console.print(f"[yellow]No worktrees available for phase {phase_name}[/yellow]")
+                console.print(f"[blue]All issues in phase {phase_name} already complete[/blue]")
                 continue
 
             phase_results = await claude_mgr.run_parallel_tdd_workflows(
                 phase_tasks,
-                max_concurrent=3
+                max_concurrent=Constants.MAX_CONCURRENT_SESSIONS
             )
 
             # Check for failures
@@ -365,11 +399,54 @@ class EpicOrchestrator:
 
         try:
             monitor = ReviewMonitor()
-            await monitor.monitor_epic_reviews(plan, worktrees)
+            instance_path = Path(f"/opt/{plan.epic.instance}")
+            await monitor.monitor_epic_reviews(plan, worktrees, instance_path)
         except asyncio.CancelledError:
             console.print("[yellow]Review monitoring stopped[/yellow]")
         except Exception as e:
             console.print(f"[red]Review monitoring error: {e}[/red]")
+
+    def get_existing_prs(self, instance_name: str) -> Dict[int, int]:
+        """Get existing PRs for issue branches.
+
+        Args:
+            instance_name: KB-LLM instance name
+
+        Returns:
+            Dictionary mapping issue_number -> pr_number
+        """
+        instance_path = Path(f"/opt/{instance_name}")
+
+        if not instance_path.exists():
+            console.print(f"[yellow]Instance path does not exist: {instance_path}[/yellow]")
+            return {}
+
+        prs = {}
+
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "list", "--json", "number,headRefName"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            pr_list = json.loads(result.stdout)
+
+            for pr in pr_list:
+                # Match issue branches like "issue-581"
+                if pr['headRefName'].startswith('issue-'):
+                    try:
+                        issue_number = int(pr['headRefName'].split('-')[1])
+                        prs[issue_number] = pr['number']
+                    except (ValueError, IndexError):
+                        continue
+
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            console.print(f"[yellow]Could not fetch existing PRs: {e}[/yellow]")
+
+        return prs
 
     async def run_complete_epic(self, epic_number: int, instance_name: str) -> bool:
         """Run complete epic workflow from analysis to completion.
@@ -382,9 +459,17 @@ class EpicOrchestrator:
             True if epic completed successfully, False otherwise
         """
         try:
-            # Step 1: Analyze epic and get plan
-            console.print(f"[blue]Step 1: Analyzing epic {epic_number}[/blue]")
-            plan = await self.analyze_epic(epic_number, instance_name)
+            # Step 1: Load or analyze epic plan
+            console.print(f"[blue]Step 1: Loading or analyzing epic {epic_number}[/blue]")
+
+            # Try to load existing plan first
+            plan = self.load_plan(epic_number)
+
+            if plan:
+                console.print(f"[green]Loaded existing plan for epic {epic_number}[/green]")
+            else:
+                console.print(f"[blue]No existing plan found, analyzing epic {epic_number}[/blue]")
+                plan = await self.analyze_epic(epic_number, instance_name)
 
             # Step 2: Create worktrees
             console.print(f"[blue]Step 2: Creating worktrees[/blue]")
@@ -394,13 +479,26 @@ class EpicOrchestrator:
                 console.print("[red]No worktrees created - cannot proceed[/red]")
                 return False
 
+            # Step 2.5: Sync Graphite stack
+            console.print("[blue]Step 2.5: Syncing Graphite stack[/blue]")
+            instance_path = Path(f"/opt/{instance_name}")
+            self.sync_graphite_stack(instance_path)
+
+            # Step 2.6: Check for existing PRs
+            console.print("[blue]Step 2.6: Checking for existing PRs[/blue]")
+            existing_prs = self.get_existing_prs(instance_name)
+            if existing_prs:
+                console.print(f"[green]Found existing PRs: {existing_prs}[/green]")
+            else:
+                console.print("[blue]No existing PRs found[/blue]")
+
             # Step 3: Start review monitoring in background
-            console.print(f"[blue]Step 3: Starting CodeRabbit review monitoring[/blue]")
+            console.print("[blue]Step 3: Starting CodeRabbit review monitoring[/blue]")
             monitor_task = asyncio.create_task(self._start_review_monitor(plan, worktrees))
 
             # Step 4: Execute development
-            console.print(f"[blue]Step 4: Starting development[/blue]")
-            results = await self.start_development(plan, worktrees)
+            console.print("[blue]Step 4: Starting development[/blue]")
+            results = await self.start_development(plan, worktrees, existing_prs)
 
             # Step 5: Report results
             console.print(f"[blue]Step 5: Development completed[/blue]")
@@ -421,6 +519,9 @@ class EpicOrchestrator:
 
         except Exception as e:
             console.print(f"[red]Epic {epic_number} failed: {e}[/red]")
+            # Don't suppress traceback for debugging
+            import traceback
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
             return False
 
     async def build_epic_container(
@@ -993,4 +1094,161 @@ class EpicOrchestrator:
             console.print(f"[green]✓ Merged {branch}[/green]")
 
         console.print(f"\n[green]Integration branch ready with {len(branch_tops)} branch(es) merged[/green]")
+        return True
+
+    async def verify_and_fix_pr_base_branches(
+        self,
+        epic_number: int,
+        instance_name: str
+    ) -> bool:
+        """Verify PR base branches match epic plan and fix if incorrect.
+
+        This prevents the common issue where PRs are created with base=main
+        instead of their parent branch in the Graphite stack.
+
+        Args:
+            epic_number: Epic number to verify
+            instance_name: KB-LLM instance name
+
+        Returns:
+            True if all PRs have correct base branches, False if errors occurred
+        """
+        import subprocess
+        import json
+
+        console.print(f"[blue]Verifying PR base branches for epic {epic_number}...[/blue]")
+
+        # Load epic plan to get expected base branches
+        plan = self.load_plan(epic_number)
+        if not plan:
+            console.print(f"[yellow]No plan found for epic {epic_number}[/yellow]")
+            return False
+
+        instance_path = Path(f"/opt/{instance_name}")
+        all_correct = True
+        fixes_made = 0
+
+        for issue in plan.issues:
+            if not issue.pr_number:
+                continue  # Skip issues without PRs
+
+            # Get actual PR base branch from GitHub
+            try:
+                result = subprocess.run(
+                    ["gh", "pr", "view", str(issue.pr_number), "--json", "baseRefName,headRefName,number"],
+                    cwd=str(instance_path),
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+
+                pr_data = json.loads(result.stdout)
+                actual_base = pr_data['baseRefName']
+                expected_base = issue.base_branch
+
+                # Check if base branch matches expected
+                if actual_base != expected_base:
+                    console.print(f"[yellow]PR #{issue.pr_number} (issue {issue.number}): base is '{actual_base}', should be '{expected_base}'[/yellow]")
+
+                    # Fix the base branch
+                    fix_result = subprocess.run(
+                        ["gh", "pr", "edit", str(issue.pr_number), "--base", expected_base],
+                        cwd=str(instance_path),
+                        capture_output=True,
+                        text=True
+                    )
+
+                    if fix_result.returncode == 0:
+                        console.print(f"[green]✓ Fixed PR #{issue.pr_number} base branch: {actual_base} → {expected_base}[/green]")
+
+                        # Sync Graphite's local metadata with GitHub after manual base branch change
+                        if issue.worktree_path:
+                            worktree_path = Path(issue.worktree_path)
+                            if worktree_path.exists():
+                                console.print("[dim]  Syncing Graphite metadata with GitHub...[/dim]")
+                                gt_sync = subprocess.run(
+                                    ["gt", "get"],
+                                    cwd=str(worktree_path),
+                                    capture_output=True,
+                                    text=True
+                                )
+                                if gt_sync.returncode == 0:
+                                    console.print("[dim]  ✓ Graphite metadata synced[/dim]")
+                                else:
+                                    console.print("[yellow]  ⚠ Could not sync Graphite (run 'gt get' manually in worktree)[/yellow]")
+
+                        fixes_made += 1
+                    else:
+                        console.print(f"[red]✗ Failed to fix PR #{issue.pr_number}: {fix_result.stderr}[/red]")
+                        all_correct = False
+                else:
+                    console.print(f"[dim]✓ PR #{issue.pr_number} (issue {issue.number}): base branch '{actual_base}' is correct[/dim]")
+
+            except subprocess.CalledProcessError as e:
+                console.print(f"[yellow]Could not verify PR #{issue.pr_number}: {e}[/yellow]")
+                all_correct = False
+            except (json.JSONDecodeError, KeyError) as e:
+                console.print(f"[yellow]Error parsing PR data for #{issue.pr_number}: {e}[/yellow]")
+                all_correct = False
+
+        if fixes_made > 0:
+            console.print(f"[green]Fixed {fixes_made} PR base branch(es)[/green]")
+
+            # Sync Graphite after fixing base branches to update metadata
+            console.print("[blue]Syncing Graphite with updated PR base branches...[/blue]")
+            self.sync_graphite_stack(instance_path)
+
+        elif all_correct:
+            console.print("[green]All PR base branches are correct[/green]")
+
+        return all_correct or fixes_made > 0
+
+    def sync_graphite_stack(self, instance_path: Path) -> bool:
+        """Sync Graphite metadata with actual git state.
+
+        Runs gt sync and gt restack to ensure Graphite's internal metadata
+        matches the actual git branch structure and GitHub PR state.
+
+        This is critical after:
+        - Creating/recreating branches outside Graphite
+        - Manually changing PR base branches
+        - Any git operations that bypass Graphite
+
+        Args:
+            instance_path: Path to the instance repository
+
+        Returns:
+            True if sync succeeded, False otherwise
+        """
+        import subprocess
+
+        console.print("[blue]Syncing Graphite stack with git and GitHub...[/blue]")
+
+        # Run gt sync to fetch latest PR metadata from GitHub
+        console.print("[dim]  Running 'gt sync'...[/dim]")
+        sync_result = subprocess.run(
+            ["gt", "sync"],
+            cwd=str(instance_path),
+            capture_output=True,
+            text=True
+        )
+
+        if sync_result.returncode != 0:
+            console.print(f"[yellow]  ⚠ gt sync had issues: {sync_result.stderr}[/yellow]")
+            # Don't fail hard - sync can have non-critical warnings
+
+        # Run gt restack to rebuild stack structure based on current git state
+        console.print("[dim]  Running 'gt restack'...[/dim]")
+        restack_result = subprocess.run(
+            ["gt", "restack"],
+            cwd=str(instance_path),
+            capture_output=True,
+            text=True
+        )
+
+        if restack_result.returncode != 0:
+            console.print(f"[yellow]  ⚠ gt restack had issues: {restack_result.stderr}[/yellow]")
+            # Don't fail hard - restack can have non-critical warnings
+
+        console.print("[green]✓ Graphite stack synced[/green]")
         return True

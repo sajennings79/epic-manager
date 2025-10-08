@@ -21,11 +21,17 @@ class TestEpicStatusCommand:
         runner = CliRunner()
 
         with runner.isolated_filesystem(temp_dir=temp_dir):
-            result = runner.invoke(main, ['epic', 'status'])
+            # Mock InstanceDiscovery to return empty results
+            with patch('epic_manager.cli.InstanceDiscovery') as mock_discovery:
+                mock_instance = Mock()
+                mock_instance.discover_instances.return_value = {}
+                mock_discovery.return_value = mock_instance
 
-            assert result.exit_code == 0
-            assert "No active epics found" in result.output
-            assert "epic-mgr epic start" in result.output
+                result = runner.invoke(main, ['epic', 'status'])
+
+                assert result.exit_code == 0
+                assert "No active epics found" in result.output
+                assert "epic-mgr epic start" in result.output
 
     def test_status_with_single_active_epic(
         self,
@@ -35,15 +41,7 @@ class TestEpicStatusCommand:
         runner = CliRunner()
 
         with runner.isolated_filesystem():
-            # Create state directory in the isolated filesystem
-            state_dir = Path("data/state")
-            state_dir.mkdir(parents=True)
-
-            from epic_manager.orchestrator import EpicOrchestrator, EpicState, EpicIssue
-            # Use the default path since we're in isolated filesystem
-            orchestrator = EpicOrchestrator()
-
-            # Create epic state without execution_order
+            # Create epic state data
             epic_state = EpicState(
                 number=355,
                 title="Authentication Overhaul",
@@ -54,28 +52,31 @@ class TestEpicStatusCommand:
                     EpicIssue(number=352, title="JWT", status="pending")
                 ]
             )
-            orchestrator._save_epic_state(epic_state)
 
-            result = runner.invoke(main, ['epic', 'status'])
+            # Mock InstanceDiscovery and EpicOrchestrator
+            with patch('epic_manager.cli.InstanceDiscovery') as mock_discovery:
+                mock_instance = Mock()
+                mock_instance.discover_instances.return_value = {'test-instance': {}}
+                mock_discovery.return_value = mock_instance
 
-            assert result.exit_code == 0
-            assert "Active Epics" in result.output
-            assert "355" in result.output
-            assert "Authentication" in result.output  # Title may be wrapped
-            assert "test-instance" in result.output
+                with patch('epic_manager.cli.EpicOrchestrator') as mock_orch_cls:
+                    mock_orch = Mock()
+                    mock_orch.list_active_epics.return_value = [epic_state]
+                    mock_orch_cls.return_value = mock_orch
+
+                    result = runner.invoke(main, ['epic', 'status'])
+
+                    assert result.exit_code == 0
+                    assert "Active Epics" in result.output
+                    assert "355" in result.output
+                    assert "Authentication" in result.output  # Title may be wrapped
+                    assert "test-instance" in result.output
 
     def test_status_with_multiple_active_epics(self, temp_dir: Path):
         """Test status command with multiple active epics."""
         runner = CliRunner()
 
         with runner.isolated_filesystem():
-            # Create state directory in the isolated filesystem
-            state_dir = Path("data/state")
-            state_dir.mkdir(parents=True)
-
-            from epic_manager.orchestrator import EpicOrchestrator, EpicState, EpicIssue
-            orchestrator = EpicOrchestrator()
-
             # Create first epic
             epic1 = EpicState(
                 number=355,
@@ -87,7 +88,6 @@ class TestEpicStatusCommand:
                     EpicIssue(number=352, title="JWT", status="in_progress")
                 ]
             )
-            orchestrator._save_epic_state(epic1)
 
             # Create second epic
             epic2 = EpicState(
@@ -99,16 +99,26 @@ class TestEpicStatusCommand:
                     EpicIssue(number=401, title="Schema Update", status="pending")
                 ]
             )
-            orchestrator._save_epic_state(epic2)
 
-            result = runner.invoke(main, ['epic', 'status'])
+            # Mock InstanceDiscovery and EpicOrchestrator
+            with patch('epic_manager.cli.InstanceDiscovery') as mock_discovery:
+                mock_instance = Mock()
+                mock_instance.discover_instances.return_value = {'test-instance': {}}
+                mock_discovery.return_value = mock_instance
 
-            assert result.exit_code == 0
-            assert "Active Epics" in result.output
-            assert "355" in result.output
-            assert "400" in result.output
-            assert "Authentication" in result.output  # Title may be wrapped
-            assert "Database Migration" in result.output
+                with patch('epic_manager.cli.EpicOrchestrator') as mock_orch_cls:
+                    mock_orch = Mock()
+                    mock_orch.list_active_epics.return_value = [epic1, epic2]
+                    mock_orch_cls.return_value = mock_orch
+
+                    result = runner.invoke(main, ['epic', 'status'])
+
+                    assert result.exit_code == 0
+                    assert "Active Epics" in result.output
+                    assert "355" in result.output
+                    assert "400" in result.output
+                    assert "Authentication" in result.output  # Title may be wrapped
+                    assert "Database Migration" in result.output
 
     def test_status_with_epic_flag(
         self,
@@ -118,13 +128,6 @@ class TestEpicStatusCommand:
         runner = CliRunner()
 
         with runner.isolated_filesystem():
-            # Create state directory in the isolated filesystem
-            state_dir = Path("data/state")
-            state_dir.mkdir(parents=True)
-
-            from epic_manager.orchestrator import EpicOrchestrator, EpicState, EpicIssue
-            orchestrator = EpicOrchestrator()
-
             # Create epic with worktree and PR info
             epic_state = EpicState(
                 number=355,
@@ -142,44 +145,54 @@ class TestEpicStatusCommand:
                     EpicIssue(number=352, title="JWT", status="pending")
                 ]
             )
-            orchestrator._save_epic_state(epic_state)
 
-            result = runner.invoke(main, ['epic', 'status', '--epic', '355'])
+            # Mock InstanceDiscovery and EpicOrchestrator
+            with patch('epic_manager.cli.InstanceDiscovery') as mock_discovery:
+                mock_instance = Mock()
+                mock_instance.discover_instances.return_value = {'test-instance': {}}
+                mock_discovery.return_value = mock_instance
 
-            assert result.exit_code == 0
-            assert "Epic #355" in result.output
-            assert "Authentication Overhaul" in result.output
-            assert "Issues" in result.output
-            assert "#351" in result.output
-            assert "/opt/work/test/issue-351" in result.output
-            assert "#451" in result.output
+                with patch('epic_manager.cli.EpicOrchestrator') as mock_orch_cls:
+                    mock_orch = Mock()
+                    mock_orch.load_epic_state.return_value = epic_state
+                    mock_orch_cls.return_value = mock_orch
+
+                    result = runner.invoke(main, ['epic', 'status', '--epic', '355'])
+
+                    assert result.exit_code == 0
+                    assert "Epic #355" in result.output
+                    assert "Authentication Overhaul" in result.output
+                    assert "Issues" in result.output
+                    assert "#351" in result.output
+                    assert "/opt/work/test/issue-351" in result.output
+                    assert "#451" in result.output
 
     def test_status_epic_not_found(self, temp_dir: Path):
         """Test status command with invalid epic number."""
         runner = CliRunner()
 
         with runner.isolated_filesystem(temp_dir=temp_dir):
-            # Create empty state directory
-            state_dir = Path(temp_dir) / "data" / "state"
-            state_dir.mkdir(parents=True)
+            # Mock InstanceDiscovery and EpicOrchestrator to return no epic
+            with patch('epic_manager.cli.InstanceDiscovery') as mock_discovery:
+                mock_instance = Mock()
+                mock_instance.discover_instances.return_value = {'test-instance': {}}
+                mock_discovery.return_value = mock_instance
 
-            result = runner.invoke(main, ['epic', 'status', '--epic', '999'])
+                with patch('epic_manager.cli.EpicOrchestrator') as mock_orch_cls:
+                    mock_orch = Mock()
+                    mock_orch.load_epic_state.return_value = None
+                    mock_orch_cls.return_value = mock_orch
 
-            assert result.exit_code == 0
-            assert "Epic 999 not found" in result.output
+                    result = runner.invoke(main, ['epic', 'status', '--epic', '999'])
+
+                    assert result.exit_code == 0
+                    assert "Epic 999 not found" in result.output
 
     def test_status_shows_progress(self, temp_dir: Path):
         """Test that status command shows progress indicators."""
         runner = CliRunner()
 
         with runner.isolated_filesystem():
-            # Create state directory in the isolated filesystem
-            state_dir = Path("data/state")
-            state_dir.mkdir(parents=True)
-
-            from epic_manager.orchestrator import EpicOrchestrator, EpicState, EpicIssue
-            orchestrator = EpicOrchestrator()
-
             # Create epic with mixed issue statuses
             epic = EpicState(
                 number=355,
@@ -192,13 +205,23 @@ class TestEpicStatusCommand:
                     EpicIssue(number=353, title="Issue 3", status="pending"),
                 ]
             )
-            orchestrator._save_epic_state(epic)
 
-            result = runner.invoke(main, ['epic', 'status'])
+            # Mock InstanceDiscovery and EpicOrchestrator
+            with patch('epic_manager.cli.InstanceDiscovery') as mock_discovery:
+                mock_instance = Mock()
+                mock_instance.discover_instances.return_value = {'test-instance': {}}
+                mock_discovery.return_value = mock_instance
 
-            assert result.exit_code == 0
-            # Check for progress count
-            assert "1/3" in result.output
+                with patch('epic_manager.cli.EpicOrchestrator') as mock_orch_cls:
+                    mock_orch = Mock()
+                    mock_orch.list_active_epics.return_value = [epic]
+                    mock_orch_cls.return_value = mock_orch
+
+                    result = runner.invoke(main, ['epic', 'status'])
+
+                    assert result.exit_code == 0
+                    # Check for progress count
+                    assert "1/3" in result.output
 
     def test_status_with_verbose_flag(
         self,

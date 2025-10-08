@@ -12,26 +12,28 @@ from typing import Dict, List, Optional, Any
 
 from rich.console import Console
 
+from .config import Constants
+
 console = Console()
 
 
 class GraphiteManager:
     """Manages Graphite stacked PR workflows with live state queries."""
 
-    def __init__(self, gt_command: str = "gt") -> None:
+    def __init__(self, gt_command: Optional[str] = None) -> None:
         """Initialize Graphite manager.
 
         Args:
-            gt_command: Command to execute Graphite CLI
+            gt_command: Command to execute Graphite CLI (default: from Constants)
         """
-        self.gt_command = gt_command
+        self.gt_command = gt_command or Constants.GRAPHITE_COMMAND
 
         # Verify Graphite is available
         try:
             result = subprocess.run([self.gt_command, "--version"], capture_output=True, text=True)
             console.print(f"[green]Graphite CLI available: {result.stdout.strip()}[/green]")
         except FileNotFoundError:
-            console.print(f"[red]Warning: Graphite CLI '{gt_command}' not found[/red]")
+            console.print(f"[red]Warning: Graphite CLI '{self.gt_command}' not found[/red]")
 
     def create_branch(self, worktree_path: Path, branch_name: str) -> bool:
         """Create a new Graphite branch in the specified worktree.

@@ -12,7 +12,13 @@
       "Bash(gh run view:*)",
       "Bash(gh pr list:*)",
       "Read(//opt/**)",
-      "Bash(git worktree:*)"
+      "Bash(git worktree:*)",
+      "Bash(python3:*)",
+      "Bash(gt log:*)",
+      "Bash(isort:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []

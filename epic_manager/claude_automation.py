@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from rich.console import Console
 
 from .models import WorkflowResult
+from .config import Constants
 
 try:
     from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, query
@@ -49,13 +50,15 @@ class ClaudeSessionManager:
     async def get_epic_plan(
         self,
         instance_path: Path,
-        epic_number: int
+        epic_number: int,
+        instance_name: str
     ) -> str:
-        """Request epic plan JSON from Claude using /epic-plan command.
+        """Request epic plan JSON from Claude using centralized prompt.
 
         Args:
             instance_path: Path to the KB-LLM instance repository
             epic_number: Epic number to analyze
+            instance_name: Name of the KB-LLM instance
 
         Returns:
             JSON string from Claude's /epic-plan response
@@ -66,6 +69,8 @@ class ClaudeSessionManager:
         if ClaudeSDKClient is None:
             raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
 
+        from .prompts import EPIC_PLAN_PROMPT
+
         console.print(f"[green]Requesting epic plan for epic {epic_number}[/green]")
         console.print(f"[blue]Instance: {instance_path}[/blue]")
 
@@ -75,80 +80,66 @@ class ClaudeSessionManager:
             permission_mode='bypassPermissions'
         )
 
-        # Create prompt for epic analysis
-        prompt = f"""Analyze GitHub epic #{epic_number} and create a JSON execution plan.
-
-Read the epic and all linked issues, then return ONLY a JSON object (no markdown, no explanation) with this structure:
-
-{{
-  "epic": {{
-    "number": {epic_number},
-    "title": "Epic title",
-    "repo": "owner/repo-name",
-    "instance": "{instance_path.name}"
-  }},
-  "issues": [
-    {{
-      "number": 123,
-      "title": "Issue title",
-      "status": "pending",
-      "dependencies": [],
-      "base_branch": "main"
-    }}
-  ],
-  "parallelization": {{
-    "phase_1": [123],
-    "phase_2": [124, 125]
-  }}
-}}
-
-Return ONLY the JSON, no other text."""
+        # Create prompt for epic analysis using centralized template
+        prompt = EPIC_PLAN_PROMPT.format(
+            epic_number=epic_number,
+            instance_name=instance_name
+        )
 
         response_parts = []
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt)
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(prompt)
 
-            async for message in client.receive_response():
-                console.print(f"[dim]DEBUG: Received {type(message).__name__}[/dim]")
+                async for message in client.receive_response():
+                    if isinstance(message, dict):
+                        if message.get("type") == "text":
+                            text = message.get("text", "")
+                            response_parts.append(text)
+                        elif message.get("type") == "error":
+                            console.print(f"[red]Error: {message.get('error')}[/red]")
+                    elif isinstance(message, AssistantMessage):
+                        # Extract text from content blocks
+                        try:
+                            for block in message.content:
+                                if isinstance(block, TextBlock):
+                                    response_parts.append(block.text)
+                        except Exception as e:
+                            console.print(f"[yellow]Warning: Error processing message content: {e}[/yellow]")
+                    elif isinstance(message, ResultMessage):
+                        # Result message may contain final output
+                        if hasattr(message, 'result') and message.result:
+                            response_parts.append(message.result)
+                    elif isinstance(message, SystemMessage):
+                        # System messages are informational, skip them
+                        pass
+                    elif isinstance(message, UserMessage):
+                        # User messages contain tool results, skip them (internal SDK flow)
+                        pass
+                    else:
+                        # Log unexpected message types
+                        console.print(f"[yellow]WARNING: Unexpected message type {type(message).__name__}[/yellow]")
 
-                if isinstance(message, dict):
-                    if message.get("type") == "text":
-                        text = message.get("text", "")
-                        console.print(f"[dim]DEBUG: Dict text: {text[:100]}...[/dim]")
-                        response_parts.append(text)
-                    elif message.get("type") == "error":
-                        console.print(f"[red]Error: {message.get('error')}[/red]")
-                elif isinstance(message, AssistantMessage):
-                    # Extract text from content blocks
-                    console.print(f"[dim]DEBUG: AssistantMessage has {len(message.content)} content blocks[/dim]")
-                    for block in message.content:
-                        console.print(f"[dim]DEBUG: Block type: {type(block).__name__}[/dim]")
-                        if isinstance(block, TextBlock):
-                            console.print(f"[dim]DEBUG: TextBlock content: {block.text[:100]}...[/dim]")
-                            response_parts.append(block.text)
-                elif isinstance(message, ResultMessage):
-                    # Result message may contain final output
-                    console.print(f"[dim]DEBUG: ResultMessage - result={message.result}, is_error={message.is_error}[/dim]")
-                    if message.result:
-                        console.print(f"[dim]DEBUG: Result text: {message.result[:100]}...[/dim]")
-                        response_parts.append(message.result)
-                elif isinstance(message, SystemMessage):
-                    # System messages are informational, skip them
-                    console.print(f"[dim]DEBUG: SystemMessage - subtype={message.subtype}[/dim]")
-                elif isinstance(message, UserMessage):
-                    # User messages contain tool results, skip them (internal SDK flow)
-                    console.print(f"[dim]DEBUG: UserMessage (tool result)[/dim]")
-                else:
-                    # Log unexpected message types
-                    console.print(f"[yellow]WARNING: Unexpected message type {type(message).__name__}[/yellow]")
+        except Exception as e:
+            console.print(f"[red]Error during Claude SDK communication: {e}[/red]")
+            import traceback
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            raise
 
         final_response = "\n".join(response_parts)
-        console.print(f"[dim]DEBUG: Final response length: {len(final_response)} chars[/dim]")
-        console.print(f"[dim]DEBUG: Response preview: {final_response[:200]}...[/dim]")
+        console.print(f"[dim]Collected {len(response_parts)} response parts, total {len(final_response)} chars[/dim]")
+
+        if not final_response.strip():
+            console.print("[red]ERROR: Empty response from Claude[/red]")
+            raise ValueError("Claude returned empty response")
 
         # Extract JSON from markdown code blocks if present
         json_response = self._extract_json_from_response(final_response)
-        console.print(f"[dim]DEBUG: Extracted JSON length: {len(json_response)} chars[/dim]")
+
+        if not json_response.strip():
+            console.print("[red]ERROR: Could not extract JSON from response[/red]")
+            console.print(f"[yellow]Raw response:[/yellow]\n{final_response[:500]}")
+            raise ValueError("Could not extract valid JSON from Claude's response")
 
         return json_response
 
@@ -169,18 +160,14 @@ Return ONLY the JSON, no other text."""
 
         if matches:
             # Return the first JSON block found
-            json_str = matches[0].strip()
-            console.print(f"[dim]DEBUG: Extracted JSON from markdown code block[/dim]")
-            return json_str
+            return matches[0].strip()
 
         # Try to find raw JSON (starts with { and ends with })
         json_pattern = r'\{.*\}'
         match = re.search(json_pattern, response, re.DOTALL)
 
         if match:
-            json_str = match.group(0)
-            console.print(f"[dim]DEBUG: Extracted raw JSON from response[/dim]")
-            return json_str
+            return match.group(0)
 
         # No JSON found, return original
         console.print(f"[yellow]WARNING: No JSON found in response, returning as-is[/yellow]")
@@ -259,7 +246,7 @@ Return ONLY the JSON, no other text."""
         if ClaudeSDKClient is None:
             raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
 
-        from .prompts import TDD_WORKFLOW_PROMPT
+        from .prompts import TDD_WORKFLOW_PROMPT, TDD_SYSTEM_PROMPT
 
         console.print(f"[green]Launching TDD workflow for issue {issue_number}[/green]")
         console.print(f"[blue]Worktree: {worktree_path}[/blue]")
@@ -273,11 +260,11 @@ Return ONLY the JSON, no other text."""
                 worktree_path=worktree_path
             )
 
-            # Configure Claude for TDD workflow with system prompt
+            # Configure Claude for TDD workflow with centralized system prompt
             options = ClaudeAgentOptions(
                 cwd=str(worktree_path),
                 permission_mode='bypassPermissions',
-                system_prompt="You are a TDD-focused software engineer using Graphite stacked PRs. Follow test-driven development principles strictly: write tests first, verify they fail, implement incrementally, commit frequently with clear messages. Never use TODO comments or placeholder implementations."
+                system_prompt=TDD_SYSTEM_PROMPT
             )
 
             async with ClaudeSDKClient(options=options) as client:
@@ -345,17 +332,19 @@ Return ONLY the JSON, no other text."""
     async def run_parallel_tdd_workflows(
         self,
         worktree_issues: List[Tuple[Path, int]],
-        max_concurrent: int = 3
+        max_concurrent: Optional[int] = None
     ) -> List[WorkflowResult]:
         """Run TDD workflows in parallel with concurrency limit.
 
         Args:
             worktree_issues: List of (worktree_path, issue_number) tuples
-            max_concurrent: Maximum concurrent Claude sessions
+            max_concurrent: Maximum concurrent Claude sessions (default: from Constants)
 
         Returns:
             List of WorkflowResult objects with execution details
         """
+        if max_concurrent is None:
+            max_concurrent = Constants.MAX_CONCURRENT_SESSIONS
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def run_with_limit(worktree: Path, issue_num: int):
@@ -368,17 +357,19 @@ Return ONLY the JSON, no other text."""
     async def run_parallel_review_fixers(
         self,
         pr_worktrees: List[Tuple[Path, int]],
-        max_concurrent: int = 3
+        max_concurrent: Optional[int] = None
     ) -> List[WorkflowResult]:
         """Run CodeRabbit review fix workflows in parallel with concurrency limit.
 
         Args:
             pr_worktrees: List of (worktree_path, pr_number) tuples
-            max_concurrent: Maximum concurrent Claude sessions
+            max_concurrent: Maximum concurrent Claude sessions (default: from Constants)
 
         Returns:
             List of WorkflowResult objects with execution details
         """
+        if max_concurrent is None:
+            max_concurrent = Constants.MAX_CONCURRENT_SESSIONS
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def run_with_limit(worktree: Path, pr_num: int):
@@ -484,7 +475,7 @@ Return ONLY the JSON, no other text."""
         if ClaudeSDKClient is None:
             raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
 
-        from .prompts import REVIEW_FIX_PROMPT
+        from .prompts import REVIEW_FIX_PROMPT, REVIEW_FIX_SYSTEM_PROMPT
 
         console.print(f"[green]Launching CodeRabbit fixer for PR {pr_number}[/green]")
         console.print(f"[blue]Review worktree: {worktree_path}[/blue]")
@@ -495,14 +486,14 @@ Return ONLY the JSON, no other text."""
             worktree_path=worktree_path
         )
 
-        # Use system prompt to configure review fixing behavior
+        # Use centralized system prompt to configure review fixing behavior
         start_time = datetime.now()
 
         try:
             options = ClaudeAgentOptions(
                 cwd=str(worktree_path),
                 permission_mode='bypassPermissions',
-                system_prompt="You are a code reviewer addressing PR feedback systematically. Fetch CodeRabbit comments via gh CLI, analyze each suggestion by priority, implement fixes with clear commits, and verify all changes with tests."
+                system_prompt=REVIEW_FIX_SYSTEM_PROMPT
             )
 
             async with ClaudeSDKClient(options=options) as client:

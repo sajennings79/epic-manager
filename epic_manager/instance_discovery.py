@@ -13,30 +13,29 @@ from typing import Dict, List, Optional, Any
 import yaml
 from rich.console import Console
 
+from .config import Constants
+
 console = Console()
 
 
 class InstanceDiscovery:
     """Automatically discovers KB-LLM instances on the filesystem."""
 
-    def __init__(self, base_path: str = "/opt") -> None:
+    def __init__(self, base_path: Optional[str] = None) -> None:
         """Initialize instance discovery.
 
         Args:
-            base_path: Base directory to scan for instances
+            base_path: Base directory to scan for instances (default: from Constants)
         """
+        if base_path is None:
+            base_path = Constants.INSTANCES_BASE_PATH
         self.base_path = Path(base_path)
 
         # Markers that identify a KB-LLM instance
-        self.instance_markers = [
-            "docker-compose.dev.yml",
-            "app/",
-        ]
+        self.instance_markers = Constants.INSTANCE_MARKERS
 
         # Instances to exclude from discovery
-        self.exclude_instances = {
-            "epic-manager",
-        }
+        self.exclude_instances = Constants.EXCLUDE_INSTANCES
 
     def discover_instances(self) -> Dict[str, Dict[str, Any]]:
         """Auto-discover KB-LLM instances from filesystem.

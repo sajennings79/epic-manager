@@ -62,9 +62,29 @@ class EpicPlan:
         """
         data = json.loads(json_str)
 
+        # Validate required top-level fields
+        if 'epic' not in data:
+            raise KeyError("Missing 'epic' field in JSON response")
+        if 'issues' not in data:
+            raise KeyError("Missing 'issues' field in JSON response")
+        if 'parallelization' not in data:
+            raise KeyError("Missing 'parallelization' field in JSON response")
+
+        # Parse epic info with better error messages
+        try:
+            epic = EpicInfo(**data['epic'])
+        except TypeError as e:
+            raise KeyError(f"Invalid epic data: {e}. Epic data: {data['epic']}") from e
+
+        # Parse issues with better error messages
+        try:
+            issues = [IssueInfo(**issue_data) for issue_data in data['issues']]
+        except TypeError as e:
+            raise KeyError(f"Invalid issue data: {e}") from e
+
         return cls(
-            epic=EpicInfo(**data['epic']),
-            issues=[IssueInfo(**issue_data) for issue_data in data['issues']],
+            epic=epic,
+            issues=issues,
             parallelization=data['parallelization']
         )
 
