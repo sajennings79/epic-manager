@@ -85,4 +85,4 @@ data/logs/*.txt
 
 # Development tools
 .mypy_cache/
-.ruff_cache/
+.ruff_cache/TODOS.md
