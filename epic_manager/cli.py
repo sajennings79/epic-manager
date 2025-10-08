@@ -9,7 +9,7 @@ Provides commands for epic management, worktree operations, and monitoring.
 import sys
 import asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 import click
 import yaml
@@ -231,7 +231,7 @@ def start(config: Config, epic_number: int) -> None:
 
     async def run_epic():
         try:
-            orchestrator = EpicOrchestrator()
+            orchestrator = EpicOrchestrator(instance_name=config.instance)
             success = await orchestrator.run_complete_epic(epic_number, config.instance)
 
             if success:
@@ -260,27 +260,46 @@ def start(config: Config, epic_number: int) -> None:
 def status(config: Config, epic: Optional[int]) -> None:
     """Show status of all active epics across instances."""
     try:
-        orchestrator = EpicOrchestrator()
-
         # Show specific epic details if requested
         if epic:
-            epic_state = orchestrator.load_epic_state(epic)
-            if not epic_state:
-                console.print(f"[red]Epic {epic} not found[/red]")
-                return
+            # Try to load from selected instance first
+            if config.instance:
+                orchestrator = EpicOrchestrator(instance_name=config.instance)
+                epic_state = orchestrator.load_epic_state(epic)
+                if epic_state:
+                    _format_epic_detail(epic_state)
+                    return
 
-            _format_epic_detail(epic_state)
+            # If not found in selected instance, search all instances
+            discovery = InstanceDiscovery()
+            instances = discovery.discover_instances()
+
+            for instance_name in instances.keys():
+                orchestrator = EpicOrchestrator(instance_name=instance_name)
+                epic_state = orchestrator.load_epic_state(epic)
+                if epic_state:
+                    _format_epic_detail(epic_state)
+                    return
+
+            console.print(f"[red]Epic {epic} not found in any instance[/red]")
             return
 
-        # Show summary of all active epics
-        active_epics = orchestrator.list_active_epics()
+        # Show summary of all active epics across all instances
+        discovery = InstanceDiscovery()
+        instances = discovery.discover_instances()
 
-        if not active_epics:
+        all_active_epics = []
+        for instance_name in instances.keys():
+            orchestrator = EpicOrchestrator(instance_name=instance_name)
+            instance_epics = orchestrator.list_active_epics()
+            all_active_epics.extend(instance_epics)
+
+        if not all_active_epics:
             console.print("[yellow]No active epics found[/yellow]")
             console.print("[dim]Run 'epic-mgr epic start <epic_number>' to begin an epic[/dim]")
             return
 
-        table = _format_epic_summary_table(active_epics)
+        table = _format_epic_summary_table(all_active_epics)
         console.print(table)
 
         # Show helpful hint
@@ -302,10 +321,14 @@ def cleanup(config: Config, epic_number: int, force: bool) -> None:
     By default, only cleans up worktrees with no commits (failed runs).
     Use --force to cleanup all worktrees regardless of state.
     """
+    if not config.instance:
+        console.print("[red]No instance selected. Use 'epic-mgr select <instance>' first.[/red]")
+        return
+
     console.print(f"[green]Cleaning up epic {epic_number} worktrees[/green]")
 
     try:
-        orchestrator = EpicOrchestrator()
+        orchestrator = EpicOrchestrator(instance_name=config.instance)
         workspace_mgr = WorkspaceManager()
 
         # Load epic state to find worktrees
@@ -374,6 +397,45 @@ def stop(config: Config, epic_number: int) -> None:
     runner.invoke(cleanup, [str(epic_number)], obj=config)
 
 
+@epic.command(name="verify-prs")
+@click.argument("epic_number", type=int)
+@pass_config
+def verify_prs(config: Config, epic_number: int) -> None:
+    """Verify and fix PR base branches for an epic.
+
+    Checks that all PRs have the correct base branch according to the epic plan.
+    Automatically fixes any PRs with incorrect base branches (e.g., base=main
+    when should be base=issue-581 for stacked PRs).
+    """
+    if not config.instance:
+        console.print("[red]No instance selected. Use 'epic-mgr select <instance>' first.[/red]")
+        return
+
+    async def run_verification():
+        try:
+            orchestrator = EpicOrchestrator(instance_name=config.instance)
+            success = await orchestrator.verify_and_fix_pr_base_branches(epic_number, config.instance)
+
+            if success:
+                console.print(f"[green]PR verification complete for epic {epic_number}[/green]")
+            else:
+                console.print(f"[yellow]PR verification had some issues for epic {epic_number}[/yellow]")
+
+            return success
+
+        except Exception as e:
+            console.print(f"[red]Error verifying PRs: {e}[/red]")
+            if config.verbose:
+                raise
+            return False
+
+    # Run the async verification
+    success = asyncio.run(run_verification())
+
+    if not success:
+        sys.exit(1)
+
+
 @epic.command()
 @click.argument("epic_number", type=int)
 @click.option("--auto-sync", is_flag=True, help="Automatically sync stack with main (no prompt)")
@@ -403,7 +465,7 @@ def build(config: Config, epic_number: int, auto_sync: bool, skip_checks: bool, 
 
     async def run_build():
         try:
-            orchestrator = EpicOrchestrator()
+            orchestrator = EpicOrchestrator(instance_name=config.instance)
             success = await orchestrator.build_epic_container(
                 epic_number,
                 config.instance,
@@ -511,6 +573,125 @@ def cleanup(config: Config, worktree_name: str) -> None:
     raise NotImplementedError("Worktree cleanup not yet implemented")
 
 
+# Helper functions for stack commands
+
+def _filter_worktrees_by_epic(worktrees: Dict[str, Dict], epic_num: int) -> Dict[str, Dict]:
+    """Filter worktrees to only those belonging to a specific epic.
+
+    Args:
+        worktrees: Dictionary of worktree information
+        epic_num: Epic number to filter by
+
+    Returns:
+        Filtered dictionary containing only worktrees for the epic
+    """
+    epic_pattern = f"-epic-{epic_num}"
+    return {
+        name: info for name, info in worktrees.items()
+        if epic_pattern in info['worktree']
+    }
+
+
+def _check_worktree_sync_status(worktree_path: Path) -> tuple:
+    """Check if worktree is behind main branch.
+
+    Args:
+        worktree_path: Path to the worktree
+
+    Returns:
+        Tuple of (needs_sync: bool, commits_behind: int)
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-list", "--count", "HEAD..main"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode == 0:
+            commits_behind = int(result.stdout.strip())
+            return (commits_behind > 0, commits_behind)
+
+    except Exception:
+        pass
+
+    # If we can't determine, assume it needs sync
+    return (True, 0)
+
+
+def _format_sync_preview_table(sync_statuses: List[Dict]) -> Table:
+    """Format preview table showing worktrees and their sync status.
+
+    Args:
+        sync_statuses: List of dictionaries with sync status information
+
+    Returns:
+        Rich Table with worktree sync preview
+    """
+    table = Table(title="Worktrees Sync Preview")
+    table.add_column("Worktree", style="cyan")
+    table.add_column("Branch", style="blue")
+    table.add_column("Status", style="white")
+    table.add_column("Behind Main", style="yellow", justify="right")
+
+    for status_info in sync_statuses:
+        name = status_info['name']
+        branch = status_info['branch']
+        commits_behind = status_info['commits_behind']
+
+        if status_info['needs_sync']:
+            status_str = "[yellow]Needs sync[/yellow]"
+            behind_str = f"{commits_behind} commits" if commits_behind > 0 else "Unknown"
+        else:
+            status_str = "[green]Up-to-date[/green]"
+            behind_str = "-"
+
+        table.add_row(name, branch, status_str, behind_str)
+
+    return table
+
+
+def _format_sync_summary_table(sync_statuses: List[Dict]) -> Table:
+    """Format summary table showing sync results.
+
+    Args:
+        sync_statuses: List of dictionaries with sync results
+
+    Returns:
+        Rich Table with sync results summary
+    """
+    table = Table(title="Sync Results")
+    table.add_column("Worktree", style="cyan")
+    table.add_column("Branch", style="blue")
+    table.add_column("Result", style="white")
+    table.add_column("Details", style="dim")
+
+    for status_info in sync_statuses:
+        name = status_info['name']
+        branch = status_info['branch']
+        status = status_info['status']
+
+        if status == 'success':
+            result_str = "[green]✓ Success[/green]"
+            details = "Synced and restacked"
+        elif status == 'failed':
+            result_str = "[red]✗ Failed[/red]"
+            details = status_info.get('error', 'Unknown error')
+        elif status == 'skipped':
+            result_str = "[dim]○ Skipped[/dim]"
+            details = "Already up-to-date"
+        else:
+            result_str = "[yellow]? Unknown[/yellow]"
+            details = ""
+
+        table.add_row(name, branch, result_str, details)
+
+    return table
+
+
 @main.group()
 def stack() -> None:
     """Graphite stack management commands."""
@@ -518,12 +699,178 @@ def stack() -> None:
 
 
 @stack.command()
+@click.option("--instance", "-i", help="Sync specific instance only")
+@click.option("--epic", "-e", type=int, help="Sync specific epic only")
+@click.option("--auto", is_flag=True, help="Skip confirmation prompts")
+@click.option("--dry-run", is_flag=True, help="Show what would be synced without syncing")
 @pass_config
-def sync(config: Config) -> None:
-    """Sync and restack all worktrees."""
-    # TODO: Implement stack synchronization
-    console.print("[green]Syncing Graphite stacks[/green]")
-    raise NotImplementedError("Stack synchronization not yet implemented")
+def sync(
+    config: Config,
+    instance: Optional[str],
+    epic: Optional[int],
+    auto: bool,
+    dry_run: bool
+) -> None:
+    """Sync and restack all Graphite stacks across worktrees.
+
+    This command synchronizes all issue worktrees with the latest changes from
+    the main branch and restacks the Graphite branches. Useful for keeping epic
+    development branches up-to-date and avoiding merge conflicts.
+
+    Examples:
+        epic-mgr stack sync                    # Sync all worktrees
+        epic-mgr stack sync -i scottbot        # Sync specific instance
+        epic-mgr stack sync -e 355             # Sync specific epic
+        epic-mgr stack sync --auto             # No confirmation prompts
+        epic-mgr stack sync --dry-run          # Preview what would be synced
+    """
+    from pathlib import Path
+    import subprocess
+    from .workspace_manager import WorkspaceManager
+    from .graphite_integration import GraphiteManager
+
+    # Determine target instance
+    target_instance = instance or config.instance
+
+    console.print("[bold cyan]Stack Sync[/bold cyan]")
+    if target_instance:
+        console.print(f"[dim]Instance: {target_instance}[/dim]")
+    if epic:
+        console.print(f"[dim]Epic: #{epic}[/dim]")
+    console.print()
+
+    # Step 1: Discover worktrees
+    console.print("[blue]Discovering worktrees...[/blue]")
+    workspace_mgr = WorkspaceManager()
+
+    # Prune stale references first
+    if target_instance:
+        instance_path = Path(f"/opt/{target_instance}")
+        if instance_path.exists():
+            workspace_mgr.prune_stale_worktrees(instance_path)
+
+    all_worktrees = workspace_mgr.list_worktrees(target_instance)
+
+    if not all_worktrees:
+        console.print("[yellow]No worktrees found[/yellow]")
+        if target_instance:
+            console.print(f"[dim]Try creating worktrees with: epic-mgr epic start <epic_number>[/dim]")
+        else:
+            console.print(f"[dim]Select an instance first: epic-mgr select <instance>[/dim]")
+        return
+
+    # Filter by epic if requested
+    if epic:
+        all_worktrees = _filter_worktrees_by_epic(all_worktrees, epic)
+        if not all_worktrees:
+            console.print(f"[yellow]No worktrees found for epic {epic}[/yellow]")
+            return
+
+    # Filter out main repository (only sync issue worktrees)
+    worktrees_to_sync = {
+        name: info for name, info in all_worktrees.items()
+        if 'issue-' in Path(info['worktree']).name
+    }
+
+    if not worktrees_to_sync:
+        console.print("[yellow]No issue worktrees found to sync[/yellow]")
+        console.print("[dim]Only issue worktrees (issue-NNN) are synced[/dim]")
+        return
+
+    console.print(f"[green]Found {len(worktrees_to_sync)} worktree(s) to sync[/green]\n")
+
+    # Step 2: Check sync status for each worktree
+    console.print("[blue]Checking sync status...[/blue]")
+    sync_statuses = []
+
+    for name, info in worktrees_to_sync.items():
+        worktree_path = Path(info['worktree'])
+        branch = info.get('branch', 'unknown')
+
+        needs_sync, commits_behind = _check_worktree_sync_status(worktree_path)
+        sync_statuses.append({
+            'name': name,
+            'path': worktree_path,
+            'branch': branch,
+            'needs_sync': needs_sync,
+            'commits_behind': commits_behind,
+            'status': 'pending'
+        })
+
+    # Count how many need syncing
+    need_sync_count = sum(1 for s in sync_statuses if s['needs_sync'])
+    up_to_date_count = len(sync_statuses) - need_sync_count
+
+    # Step 3: Display preview and get confirmation
+    preview_table = _format_sync_preview_table(sync_statuses)
+    console.print(preview_table)
+    console.print()
+
+    if need_sync_count == 0:
+        console.print("[green]All worktrees are already up-to-date![/green]")
+        return
+
+    console.print(f"[yellow]{need_sync_count} worktree(s) need syncing, {up_to_date_count} already up-to-date[/yellow]\n")
+
+    if dry_run:
+        console.print("[blue]Dry run - no changes made[/blue]")
+        return
+
+    if not auto:
+        response = click.confirm(f"Sync {need_sync_count} worktree(s)?", default=True)
+        if not response:
+            console.print("[yellow]Sync cancelled[/yellow]")
+            return
+
+    # Step 4: Execute sync
+    console.print("\n[bold green]Syncing worktrees...[/bold green]\n")
+    gt_mgr = GraphiteManager()
+
+    success_count = 0
+    failure_count = 0
+    skipped_count = 0
+
+    for idx, status_info in enumerate(sync_statuses, 1):
+        name = status_info['name']
+        worktree_path = status_info['path']
+        branch = status_info['branch']
+
+        if not status_info['needs_sync']:
+            console.print(f"[dim][{idx}/{len(sync_statuses)}] Skipping {name} ({branch}) - already up-to-date[/dim]")
+            status_info['status'] = 'skipped'
+            skipped_count += 1
+            continue
+
+        console.print(f"[blue][{idx}/{len(sync_statuses)}] Syncing {name} ({branch})...[/blue]")
+
+        success = gt_mgr.sync_stack(worktree_path)
+
+        if success:
+            status_info['status'] = 'success'
+            success_count += 1
+            console.print(f"[green]  ✓ Synced successfully[/green]")
+        else:
+            status_info['status'] = 'failed'
+            status_info['error'] = 'Sync command failed'
+            failure_count += 1
+            console.print(f"[red]  ✗ Sync failed[/red]")
+
+        console.print()
+
+    # Step 5: Display summary
+    console.print("[bold cyan]Sync Summary[/bold cyan]\n")
+    summary_table = _format_sync_summary_table(sync_statuses)
+    console.print(summary_table)
+    console.print()
+
+    console.print(f"[green]✓ Success: {success_count}[/green]")
+    console.print(f"[red]✗ Failed: {failure_count}[/red]")
+    console.print(f"[dim]○ Skipped: {skipped_count}[/dim]")
+
+    if failure_count > 0:
+        console.print("\n[yellow]Some syncs failed. Check errors above for details.[/yellow]")
+        console.print("[dim]You may need to resolve conflicts manually in failed worktrees.[/dim]")
+        sys.exit(1)
 
 
 @stack.command()
@@ -701,11 +1048,10 @@ def monitor(config: Config, epic_number: int) -> None:
 
     async def run_monitor():
         try:
-            # Create orchestrator with instance-specific state directory
-            instance_path = Path(f"/opt/{config.instance}")
-            state_dir = instance_path / "data" / "state"
-            orchestrator = EpicOrchestrator(state_dir=str(state_dir))
+            # Create orchestrator for instance
+            orchestrator = EpicOrchestrator(instance_name=config.instance)
             monitor = ReviewMonitor()
+            instance_path = Path(f"/opt/{config.instance}")
 
             # Try to load the epic plan (for managed epics)
             plan = orchestrator.load_plan(epic_number)
