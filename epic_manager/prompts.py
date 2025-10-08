@@ -15,13 +15,19 @@ CURRENT CONTEXT:
 
 WORKFLOW STEPS:
 
-1. STACK CONTEXT CHECK:
+1. SYNC GRAPHITE STACK:
+   - Run: gt sync (fetch latest PR metadata from GitHub)
+   - Run: gt restack (rebuild stack based on current git state)
+   - Verify: gt ls shows correct stack structure
+   - This ensures Graphite metadata matches git reality
+
+2. STACK CONTEXT CHECK:
    - Run: gt ls
-   - Run: gt sync
    - Run: gt status
    - Verify stack is up-to-date with trunk
+   - Confirm current branch position in stack
 
-2. REGISTER EXISTING BRANCH IN GRAPHITE:
+3. REGISTER EXISTING BRANCH IN GRAPHITE:
    - Note: Branch 'issue-{issue_number}' already exists (created by worktree manager with correct base branch)
    - Run: git branch --show-current (should show issue-{issue_number})
    - Run: gt track issue-{issue_number}
@@ -29,7 +35,7 @@ WORKFLOW STEPS:
    - Verify with: gt status && git status
    - DO NOT run 'gt create' - the branch already exists with the correct base
 
-3. ANALYZE ISSUE (Requirements extraction and test scenarios):
+4. ANALYZE ISSUE (Requirements extraction and test scenarios):
    - Fetch issue: gh issue view {issue_number} --json title,body,comments
    - Extract all requirements from issue description
    - Identify acceptance criteria from issue body
@@ -37,7 +43,7 @@ WORKFLOW STEPS:
    - Document test scenarios needed for complete coverage
    - Create test plan covering all scenarios
 
-4. CREATE COMPREHENSIVE TEST SUITE (Test-driven development):
+5. CREATE COMPREHENSIVE TEST SUITE (Test-driven development):
    - Create test files: tests/issue_{issue_number}_test_*.py
    - Write tests for ALL of the following:
      * Every acceptance criterion from the issue
@@ -47,13 +53,13 @@ WORKFLOW STEPS:
    - Use descriptive test names that explain what is being tested
    - Commit tests: git commit -m "test(#{issue_number}): Add failing tests for [description]"
 
-5. VERIFY TEST FAILURES:
+6. VERIFY TEST FAILURES:
    - Run: pytest tests/issue_{issue_number}_* -v
    - Confirm ALL tests fail initially
    - Verify failures are for correct reasons (NotImplementedError, missing functionality)
    - Document expected failure messages
 
-6. IMPLEMENT FEATURE INCREMENTALLY (Step-by-step implementation):
+7. IMPLEMENT FEATURE INCREMENTALLY (Step-by-step implementation):
    - Implement smallest testable increment first
    - Run tests after EACH change: pytest tests/issue_{issue_number}_* -v
    - Continue implementing until tests pass
@@ -64,7 +70,7 @@ WORKFLOW STEPS:
    - NEVER leave TODO comments or stubbed methods
    - Continue until ALL tests pass
 
-7. VERIFY COMPLETENESS (Implementation validation):
+8. VERIFY COMPLETENESS (Implementation validation):
    - Run full test suite: pytest
    - Verify ALL new tests pass
    - Run linting: flake8 .
@@ -74,15 +80,26 @@ WORKFLOW STEPS:
    - Verify ALL acceptance criteria from issue are implemented
    - Fix any linting or formatting issues found
 
-8. SUBMIT STACKED PR:
+9. SUBMIT STACKED PR:
    - Review all commits: git log --oneline -10
    - Verify commit messages are clear and descriptive
    - Create PR with Graphite:
      gt submit --no-interactive \\
        --title "Fix #{issue_number}: [Descriptive title from issue]" \\
        --body "## Summary\\n\\n[Detailed description of changes made]\\n\\n## Test Coverage\\n\\n[List all tests added and what they cover]\\n\\n## Stack Position\\n\\n[Describe if this is part of an epic and any dependencies]\\n\\nFixes #{issue_number}"
+   - Capture PR number from output
 
-9. FINAL VERIFICATION:
+10. VERIFY PR BASE BRANCH:
+   - Get PR number from previous step
+   - Run: gh pr view <PR_NUMBER> --json baseRefName,headRefName
+   - Verify baseRefName matches expected parent branch from stack
+   - If PR base is 'main' but should be another issue branch:
+     * Run: gh pr edit <PR_NUMBER> --base <correct-parent-branch>
+     * Run: gt get (sync Graphite's local metadata with GitHub)
+     * Confirm: "Fixed PR base branch to maintain stack integrity"
+   - This ensures Graphite stack structure is preserved on GitHub
+
+11. FINAL VERIFICATION:
    - Run: gt ls (verify stack structure)
    - Run: gt status (confirm PR URL)
    - Confirm ALL tests passing: pytest
@@ -94,6 +111,7 @@ COMPLETION CRITERIA (ALL must be true):
 - ✓ ALL tests now passing
 - ✓ Code linted and formatted (flake8, black, isort)
 - ✓ PR submitted via Graphite with proper title and body
+- ✓ PR base branch verified to match stack structure (not wrongly pointing to main)
 - ✓ NO TODOs, NotImplementedError, or stub methods remaining
 - ✓ Multiple logical commits with clear, descriptive messages
 - ✓ All acceptance criteria from issue implemented
@@ -239,3 +257,66 @@ VERIFICATION CHECKLIST:
 
 Report any incomplete implementations or missing requirements found.
 """
+
+
+EPIC_PLAN_PROMPT = """Analyze GitHub epic #{epic_number} and create a JSON execution plan.
+
+Read the epic and all linked issues, then return ONLY a JSON object (no markdown, no explanation) with this structure:
+
+{{
+  "epic": {{
+    "number": {epic_number},
+    "title": "Epic title",
+    "repo": "owner/repo-name",
+    "instance": "{instance_name}"
+  }},
+  "issues": [
+    {{
+      "number": 123,
+      "title": "First issue - starts from main",
+      "status": "pending",
+      "dependencies": [],
+      "base_branch": "main"
+    }},
+    {{
+      "number": 124,
+      "title": "Second issue - depends on 123",
+      "status": "pending",
+      "dependencies": [123],
+      "base_branch": "issue-123"
+    }},
+    {{
+      "number": 125,
+      "title": "Third issue - also depends on 123",
+      "status": "pending",
+      "dependencies": [123],
+      "base_branch": "issue-123"
+    }}
+  ],
+  "parallelization": {{
+    "phase_1": [123],
+    "phase_2": [124, 125]
+  }}
+}}
+
+CRITICAL INSTRUCTIONS FOR base_branch:
+- base_branch MUST be a valid git branch reference, NOT a description or component name
+- Use "main" for issues that start from trunk (first issue, or independent parallel issues)
+- Use "issue-{{number}}" for issues that depend on another issue's branch
+- The base_branch creates the Graphite stack parent-child relationship
+- NEVER use folder paths, component names, or descriptions (e.g., NOT "backend/service-name")
+
+Examples:
+- First issue or independent: {{"base_branch": "main", "dependencies": []}}
+- Depends on issue 123: {{"base_branch": "issue-123", "dependencies": [123]}}
+- Depends on issue 124: {{"base_branch": "issue-124", "dependencies": [124]}}
+- Parallel issues both starting from main: {{"base_branch": "main", "dependencies": []}}
+
+Return ONLY the JSON, no other text."""
+
+
+# System prompts for Claude Code SDK sessions
+
+TDD_SYSTEM_PROMPT = """You are a TDD-focused software engineer using Graphite stacked PRs. Follow test-driven development principles strictly: write tests first, verify they fail, implement incrementally, commit frequently with clear messages. Never use TODO comments or placeholder implementations."""
+
+REVIEW_FIX_SYSTEM_PROMPT = """You are a code reviewer addressing PR feedback systematically. Fetch CodeRabbit comments via gh CLI, analyze each suggestion by priority, implement fixes with clear commits, and verify all changes with tests."""

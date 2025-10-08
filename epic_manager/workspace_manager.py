@@ -11,18 +11,22 @@ from typing import Dict, List, Optional
 
 from rich.console import Console
 
+from .config import Constants
+
 console = Console()
 
 
 class WorkspaceManager:
     """Manages git worktrees for parallel epic development."""
 
-    def __init__(self, work_base_path: str = "/opt/work") -> None:
+    def __init__(self, work_base_path: Optional[str] = None) -> None:
         """Initialize workspace manager.
 
         Args:
-            work_base_path: Base directory for all worktrees
+            work_base_path: Base directory for all worktrees (default: from Constants)
         """
+        if work_base_path is None:
+            work_base_path = Constants.WORK_BASE_PATH
         self.work_base_path = Path(work_base_path)
         self.work_base_path.mkdir(exist_ok=True, parents=True)
 
@@ -172,7 +176,7 @@ class WorkspaceManager:
             console.print(f"[blue]Worktree created successfully[/blue]")
 
             # Optional: Track in Graphite for stack operations
-            self._track_in_graphite(worktree_path, branch_name)
+            self._track_in_graphite(worktree_path, branch_name, base_branch, base_repo)
 
             return worktree_path
 
@@ -416,23 +420,38 @@ class WorkspaceManager:
 
         return None
 
-    def _track_in_graphite(self, worktree_path: Path, branch_name: str) -> None:
+    def _track_in_graphite(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        base_branch: str,
+        base_repo: Path
+    ) -> None:
         """Track branch in Graphite for stack operations (optional).
 
         Args:
             worktree_path: Path to the worktree
             branch_name: Name of the branch to track
+            base_branch: Parent branch name (e.g., "main" or "issue-581")
+            base_repo: Path to the base repository
 
         Note:
             This is non-critical - Claude can track the branch later if this fails.
+            Graphite infers parent relationships from git's branch structure automatically
+            when you run 'gt track'. The parent detection works once branches have
+            diverged (have different commits).
         """
         try:
+            # Track the branch in Graphite
+            # Graphite will infer the parent from git's branch point automatically
             result = subprocess.run([
                 "gt", "track", branch_name
             ], cwd=str(worktree_path), capture_output=True, text=True, timeout=10)
 
             if result.returncode == 0:
                 console.print(f"[blue]Branch {branch_name} tracked in Graphite[/blue]")
+                if base_branch != "main":
+                    console.print(f"[dim]  Graphite will infer parent ({base_branch}) from git structure[/dim]")
             else:
                 console.print(f"[yellow]Could not track in Graphite (non-critical): {result.stderr}[/yellow]")
 

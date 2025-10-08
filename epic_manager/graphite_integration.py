@@ -12,19 +12,21 @@ from typing import Dict, List, Optional, Any
 
 from rich.console import Console
 
+from .config import Constants
+
 console = Console()
 
 
 class GraphiteManager:
     """Manages Graphite stacked PR workflows with live state queries."""
 
-    def __init__(self, gt_command: str = "gt") -> None:
+    def __init__(self, gt_command: Optional[str] = None) -> None:
         """Initialize Graphite manager.
 
         Args:
-            gt_command: Command to execute Graphite CLI
+            gt_command: Command to execute Graphite CLI (default: from Constants)
         """
-        self.gt_command = gt_command
+        self.gt_command = gt_command or Constants.GRAPHITE_COMMAND
 
         # Verify Graphite is available
         try:
