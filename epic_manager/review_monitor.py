@@ -18,6 +18,7 @@ from rich.console import Console
 
 from .models import EpicPlan
 from .claude_automation import ClaudeSessionManager
+from .config import Constants
 
 console = Console()
 
@@ -41,20 +42,20 @@ class ReviewMonitor:
 
     def __init__(
         self,
-        poll_interval: int = 60,
-        gh_command: str = "gh",
-        coderabbit_username: str = "coderabbitai"
+        poll_interval: Optional[int] = None,
+        gh_command: Optional[str] = None,
+        coderabbit_username: Optional[str] = None
     ) -> None:
         """Initialize review monitor.
 
         Args:
-            poll_interval: Polling interval in seconds
-            gh_command: GitHub CLI command
-            coderabbit_username: Username to identify CodeRabbit comments
+            poll_interval: Polling interval in seconds (default: from Constants)
+            gh_command: GitHub CLI command (default: from Constants)
+            coderabbit_username: Username to identify CodeRabbit comments (default: from Constants)
         """
-        self.poll_interval = poll_interval
-        self.gh_command = gh_command
-        self.coderabbit_username = coderabbit_username
+        self.poll_interval = poll_interval or Constants.REVIEW_POLL_INTERVAL
+        self.gh_command = gh_command or Constants.GITHUB_CLI_COMMAND
+        self.coderabbit_username = coderabbit_username or Constants.CODERABBIT_USERNAME
 
         # Track addressed PRs to avoid reprocessing
         self.addressed_prs: Set[int] = set()
@@ -127,7 +128,9 @@ class ReviewMonitor:
             body = data.get('body', '')
 
             # Parse issue numbers from body (matches #123 format)
-            issue_numbers = [int(m) for m in re.findall(r'#(\d+)', body)]
+            # Filter out color codes and other large numbers that can't be GitHub issues
+            all_numbers = [int(m) for m in re.findall(r'#(\d+)', body)]
+            issue_numbers = sorted(set(n for n in all_numbers if n < 100000))  # Remove duplicates and filter hex colors
 
             if not issue_numbers:
                 console.print(f"[yellow]No linked issues found in epic #{epic_number}[/yellow]")
@@ -268,7 +271,10 @@ class ReviewMonitor:
 
                 # Launch all fixes in parallel
                 claude_mgr = ClaudeSessionManager()
-                results = await claude_mgr.run_parallel_review_fixers(pr_worktrees, max_concurrent=3)
+                results = await claude_mgr.run_parallel_review_fixers(
+                    pr_worktrees,
+                    max_concurrent=Constants.MAX_CONCURRENT_SESSIONS
+                )
 
                 # Process results
                 for (issue_num, pr_num), result in zip(prs_needing_fixes, results):
