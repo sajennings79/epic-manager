@@ -30,6 +30,10 @@ This is an example implementation demonstrating Claude Agent SDK integration pat
 - Epic analysis and planning via Claude Code
 - Automated test writing and implementation
 - CodeRabbit review monitoring and auto-fixes
+- Epic resumption - automatically skip completed issues
+- PR base branch verification and auto-fix
+- Graphite stack sync integration
+- Integration testing with epic build workflow
 
 ## Quick Start
 
@@ -58,11 +62,23 @@ epic-mgr instances
 # Select a package to work with
 epic-mgr select package-1
 
-# Start epic development workflow
+# Start epic development workflow (creates worktrees, runs TDD workflows)
 epic-mgr epic start 123
 
-# Monitor progress
-epic-mgr dashboard
+# Resume epic after interruption (automatically skips completed issues)
+epic-mgr epic start 123
+
+# Verify PR base branches are correct
+epic-mgr epic verify-prs 123
+
+# Build and test complete epic
+epic-mgr epic build 123
+
+# Monitor CodeRabbit reviews
+epic-mgr review monitor 123
+
+# View progress
+epic-mgr epic status
 ```
 
 ## Architecture
@@ -73,7 +89,11 @@ Epic Manager operates as a centralized orchestrator managing multiple software p
 /opt/
 ├── epic-manager/           # Orchestration tool
 ├── package-1/              # Software package instance
+│   └── .epic-mgr/         # Instance-specific state
+│       └── state/         # Epic plans and status
 ├── package-2/              # Software package instance
+│   └── .epic-mgr/
+│       └── state/
 ├── package-3/              # Software package instance
 └── work/                   # Parallel development workspaces
     ├── package-1-epic-123/
@@ -90,6 +110,32 @@ Epic Manager operates as a centralized orchestrator managing multiple software p
 3. **Parallel Development** - Concurrent Claude Code TDD sessions via SDK
 4. **Stack Management** - Graphite PRs with dependency chains
 5. **Review Automation** - Monitor and auto-fix CodeRabbit feedback
+
+### Advanced Features
+
+**Epic Resumption**
+- Detects existing PRs and skips completed work
+- Loads saved epic plans to avoid re-analysis
+- Automatically resumes from last incomplete issue
+- Example: Running `epic-mgr epic start 123` twice will skip already-completed issues
+
+**PR Base Branch Verification**
+- Validates PR targets match stack structure
+- Auto-fixes PRs pointing to wrong base branch
+- Maintains Graphite stack integrity on GitHub
+- Prevents broken stack visualization
+
+**Integration Testing**
+- Build complete epic in Docker container
+- Creates integration branch merging all changes
+- Test epic functionality before merging to main
+- Command: `epic-mgr epic build <epic-number>`
+
+**Graphite Sync**
+- Automatic sync after worktree creation
+- Keeps Graphite metadata aligned with git
+- Prevents "unknown parent" warnings
+- Integrated into TDD workflow
 
 ## Claude Agent SDK Usage
 
@@ -133,7 +179,9 @@ results = await asyncio.gather(*tasks)
 # Epic management
 epic-mgr epic start <epic-number>     # Start epic workflow
 epic-mgr epic status                  # Show active epics
-epic-mgr epic stop <epic-number>      # Stop and cleanup
+epic-mgr epic verify-prs <epic-number> # Verify/fix PR base branches
+epic-mgr epic build <epic-number>     # Build epic for integration testing
+epic-mgr epic cleanup <epic-number>   # Cleanup worktrees
 
 # Worktree operations
 epic-mgr work issue <issue-number>    # Work on issue
@@ -141,8 +189,11 @@ epic-mgr work list                    # List worktrees
 epic-mgr work cleanup <name>          # Remove worktree
 
 # Stack management
-epic-mgr stack sync                   # Sync and restack
-epic-mgr stack status                 # Show stack status
+epic-mgr stack sync                   # Sync all worktrees with main
+epic-mgr stack sync -i <instance>     # Sync specific instance
+epic-mgr stack sync -e <epic>         # Sync specific epic
+epic-mgr stack sync --dry-run         # Preview changes
+epic-mgr stack health <epic>          # Check PR health
 
 # Review handling
 epic-mgr review pr <pr-number>        # Review PR
