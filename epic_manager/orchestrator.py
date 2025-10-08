@@ -416,6 +416,11 @@ class EpicOrchestrator:
             Dictionary mapping issue_number -> pr_number
         """
         instance_path = Path(f"/opt/{instance_name}")
+
+        if not instance_path.exists():
+            console.print(f"[yellow]Instance path does not exist: {instance_path}[/yellow]")
+            return {}
+
         prs = {}
 
         try:
