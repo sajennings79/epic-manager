@@ -176,7 +176,7 @@ class WorkspaceManager:
             console.print(f"[blue]Worktree created successfully[/blue]")
 
             # Optional: Track in Graphite for stack operations
-            self._track_in_graphite(worktree_path, branch_name, base_branch, base_repo)
+            self._track_in_graphite(worktree_path, branch_name, base_branch)
 
             return worktree_path
 
@@ -424,8 +424,7 @@ class WorkspaceManager:
         self,
         worktree_path: Path,
         branch_name: str,
-        base_branch: str,
-        base_repo: Path
+        base_branch: str
     ) -> None:
         """Track branch in Graphite for stack operations (optional).
 
@@ -433,7 +432,6 @@ class WorkspaceManager:
             worktree_path: Path to the worktree
             branch_name: Name of the branch to track
             base_branch: Parent branch name (e.g., "main" or "issue-581")
-            base_repo: Path to the base repository
 
         Note:
             This is non-critical - Claude can track the branch later if this fails.

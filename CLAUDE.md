@@ -372,7 +372,7 @@ The build command creates a temporary integration branch that merges all stack c
 4. **Tests integration**: Runs `build-dev.sh` to create container with complete epic
 
 **Branch structure example**:
-```
+```text
 main
   └─ issue-581 (PR #586)
        └─ issue-582 (PR #587)

@@ -114,7 +114,7 @@ class EpicOrchestrator:
             return plan
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             console.print(f"[red]Failed to parse epic plan JSON: {e}[/red]")
-            console.print(f"[yellow]JSON response:[/yellow]")
+            console.print("[yellow]JSON response:[/yellow]")
             console.print(plan_json[:500])  # Show first 500 chars
             raise
 
@@ -475,12 +475,12 @@ class EpicOrchestrator:
                 return False
 
             # Step 2.5: Sync Graphite stack
-            console.print(f"[blue]Step 2.5: Syncing Graphite stack[/blue]")
+            console.print("[blue]Step 2.5: Syncing Graphite stack[/blue]")
             instance_path = Path(f"/opt/{instance_name}")
             self.sync_graphite_stack(instance_path)
 
             # Step 2.6: Check for existing PRs
-            console.print(f"[blue]Step 2.6: Checking for existing PRs[/blue]")
+            console.print("[blue]Step 2.6: Checking for existing PRs[/blue]")
             existing_prs = self.get_existing_prs(instance_name)
             if existing_prs:
                 console.print(f"[green]Found existing PRs: {existing_prs}[/green]")
@@ -488,11 +488,11 @@ class EpicOrchestrator:
                 console.print("[blue]No existing PRs found[/blue]")
 
             # Step 3: Start review monitoring in background
-            console.print(f"[blue]Step 3: Starting CodeRabbit review monitoring[/blue]")
+            console.print("[blue]Step 3: Starting CodeRabbit review monitoring[/blue]")
             monitor_task = asyncio.create_task(self._start_review_monitor(plan, worktrees))
 
             # Step 4: Execute development
-            console.print(f"[blue]Step 4: Starting development[/blue]")
+            console.print("[blue]Step 4: Starting development[/blue]")
             results = await self.start_development(plan, worktrees, existing_prs)
 
             # Step 5: Report results
@@ -1160,7 +1160,7 @@ class EpicOrchestrator:
                         if issue.worktree_path:
                             worktree_path = Path(issue.worktree_path)
                             if worktree_path.exists():
-                                console.print(f"[dim]  Syncing Graphite metadata with GitHub...[/dim]")
+                                console.print("[dim]  Syncing Graphite metadata with GitHub...[/dim]")
                                 gt_sync = subprocess.run(
                                     ["gt", "get"],
                                     cwd=str(worktree_path),
@@ -1168,9 +1168,9 @@ class EpicOrchestrator:
                                     text=True
                                 )
                                 if gt_sync.returncode == 0:
-                                    console.print(f"[dim]  ✓ Graphite metadata synced[/dim]")
+                                    console.print("[dim]  ✓ Graphite metadata synced[/dim]")
                                 else:
-                                    console.print(f"[yellow]  ⚠ Could not sync Graphite (run 'gt get' manually in worktree)[/yellow]")
+                                    console.print("[yellow]  ⚠ Could not sync Graphite (run 'gt get' manually in worktree)[/yellow]")
 
                         fixes_made += 1
                     else:
@@ -1190,11 +1190,11 @@ class EpicOrchestrator:
             console.print(f"[green]Fixed {fixes_made} PR base branch(es)[/green]")
 
             # Sync Graphite after fixing base branches to update metadata
-            console.print(f"[blue]Syncing Graphite with updated PR base branches...[/blue]")
+            console.print("[blue]Syncing Graphite with updated PR base branches...[/blue]")
             self.sync_graphite_stack(instance_path)
 
         elif all_correct:
-            console.print(f"[green]All PR base branches are correct[/green]")
+            console.print("[green]All PR base branches are correct[/green]")
 
         return all_correct or fixes_made > 0
 
@@ -1217,10 +1217,10 @@ class EpicOrchestrator:
         """
         import subprocess
 
-        console.print(f"[blue]Syncing Graphite stack with git and GitHub...[/blue]")
+        console.print("[blue]Syncing Graphite stack with git and GitHub...[/blue]")
 
         # Run gt sync to fetch latest PR metadata from GitHub
-        console.print(f"[dim]  Running 'gt sync'...[/dim]")
+        console.print("[dim]  Running 'gt sync'...[/dim]")
         sync_result = subprocess.run(
             ["gt", "sync"],
             cwd=str(instance_path),
@@ -1233,7 +1233,7 @@ class EpicOrchestrator:
             # Don't fail hard - sync can have non-critical warnings
 
         # Run gt restack to rebuild stack structure based on current git state
-        console.print(f"[dim]  Running 'gt restack'...[/dim]")
+        console.print("[dim]  Running 'gt restack'...[/dim]")
         restack_result = subprocess.run(
             ["gt", "restack"],
             cwd=str(instance_path),
@@ -1245,5 +1245,5 @@ class EpicOrchestrator:
             console.print(f"[yellow]  ⚠ gt restack had issues: {restack_result.stderr}[/yellow]")
             # Don't fail hard - restack can have non-critical warnings
 
-        console.print(f"[green]✓ Graphite stack synced[/green]")
+        console.print("[green]✓ Graphite stack synced[/green]")
         return True

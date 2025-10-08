@@ -33,7 +33,7 @@ class GraphiteManager:
             result = subprocess.run([self.gt_command, "--version"], capture_output=True, text=True)
             console.print(f"[green]Graphite CLI available: {result.stdout.strip()}[/green]")
         except FileNotFoundError:
-            console.print(f"[red]Warning: Graphite CLI '{gt_command}' not found[/red]")
+            console.print(f"[red]Warning: Graphite CLI '{self.gt_command}' not found[/red]")
 
     def create_branch(self, worktree_path: Path, branch_name: str) -> bool:
         """Create a new Graphite branch in the specified worktree.

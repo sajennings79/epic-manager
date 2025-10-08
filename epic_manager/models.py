@@ -74,13 +74,13 @@ class EpicPlan:
         try:
             epic = EpicInfo(**data['epic'])
         except TypeError as e:
-            raise KeyError(f"Invalid epic data: {e}. Epic data: {data['epic']}")
+            raise KeyError(f"Invalid epic data: {e}. Epic data: {data['epic']}") from e
 
         # Parse issues with better error messages
         try:
             issues = [IssueInfo(**issue_data) for issue_data in data['issues']]
         except TypeError as e:
-            raise KeyError(f"Invalid issue data: {e}")
+            raise KeyError(f"Invalid issue data: {e}") from e
 
         return cls(
             epic=epic,

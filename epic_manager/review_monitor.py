@@ -128,9 +128,16 @@ class ReviewMonitor:
             body = data.get('body', '')
 
             # Parse issue numbers from body (matches #123 format)
-            # Filter out color codes and other large numbers that can't be GitHub issues
-            all_numbers = [int(m) for m in re.findall(r'#(\d+)', body)]
-            issue_numbers = sorted(set(n for n in all_numbers if n < 100000))  # Remove duplicates and filter hex colors
+            # Filter out CSS color codes (hex patterns like #374151) and duplicates
+            # Valid GitHub issue numbers are typically decimal integers without hex letters
+            hash_patterns = re.findall(r'#([0-9a-fA-F]+)', body)
+            issue_numbers = []
+            for pattern in hash_patterns:
+                # Filter out patterns that contain hex letters (likely color codes)
+                if re.match(r'^[0-9]+$', pattern):
+                    num = int(pattern)
+                    issue_numbers.append(num)
+            issue_numbers = sorted(set(issue_numbers))  # Remove duplicates
 
             if not issue_numbers:
                 console.print(f"[yellow]No linked issues found in epic #{epic_number}[/yellow]")

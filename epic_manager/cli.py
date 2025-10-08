@@ -727,7 +727,6 @@ def sync(
     from pathlib import Path
     import subprocess
     from .workspace_manager import WorkspaceManager
-    from .graphite_integration import GraphiteManager
 
     # Determine target instance
     target_instance = instance or config.instance
@@ -754,9 +753,9 @@ def sync(
     if not all_worktrees:
         console.print("[yellow]No worktrees found[/yellow]")
         if target_instance:
-            console.print(f"[dim]Try creating worktrees with: epic-mgr epic start <epic_number>[/dim]")
+            console.print("[dim]Try creating worktrees with: epic-mgr epic start <epic_number>[/dim]")
         else:
-            console.print(f"[dim]Select an instance first: epic-mgr select <instance>[/dim]")
+            console.print("[dim]Select an instance first: epic-mgr select <instance>[/dim]")
         return
 
     # Filter by epic if requested
@@ -848,12 +847,12 @@ def sync(
         if success:
             status_info['status'] = 'success'
             success_count += 1
-            console.print(f"[green]  ✓ Synced successfully[/green]")
+            console.print("[green]  ✓ Synced successfully[/green]")
         else:
             status_info['status'] = 'failed'
             status_info['error'] = 'Sync command failed'
             failure_count += 1
-            console.print(f"[red]  ✗ Sync failed[/red]")
+            console.print("[red]  ✗ Sync failed[/red]")
 
         console.print()
 
