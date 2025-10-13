@@ -403,6 +403,196 @@ Use `--skip-checks` to build anyway for testing.
 
 **Note**: Epic descriptions may contain color codes (e.g., `#374151` for Tailwind CSS). The PR discovery logic filters out numbers > 100,000 to avoid mistaking these for issue references. Only actual GitHub issue numbers are processed.
 
+## Schema Discovery and Validation Workflow
+
+### Overview
+
+Epic Manager implements a comprehensive schema discovery and validation workflow to prevent `AttributeError` bugs caused by incorrect field name assumptions. This workflow is integrated into the TDD process and includes three critical components:
+
+1. **Schema Discovery**: Documents all model field names before implementation
+2. **Integration Tests**: Requires minimum 20% integration tests to catch field errors
+3. **Schema Compliance Check**: Verifies field access matches documented schema
+
+### Why Schema Discovery Matters
+
+**Problem**: Field names are not guessable. Common errors include:
+- Using `.last_updated` instead of `.updated_at`
+- Using `.participant_entities` instead of `.entities_mentioned['people']`
+- Using `.finalized` instead of `.is_finalized`
+
+**Impact**: These errors cause `AttributeError` exceptions in production that are only caught at runtime.
+
+**Solution**: Mandatory schema discovery step that documents ALL field names from actual model definitions before any implementation begins.
+
+### TDD Workflow with Schema Discovery
+
+The enhanced TDD workflow (`TDD_WORKFLOW_PROMPT` in `prompts.py`) includes these steps:
+
+1. **Sync Graphite Stack**: Ensure stack is up-to-date
+2. **Stack Context Check**: Verify branch position and relationships
+3. **Register Branch**: Track existing worktree branch in Graphite
+4. **Analyze Issue**: Extract requirements (via `issue-analyzer` agent)
+5. **Schema Discovery (NEW)**: Document all model field names
+   - Identify models to be used/modified
+   - Read each model definition file
+   - Document ALL field names exactly as defined
+   - Create schema reference for implementation
+6. **Create Tests**: Write unit AND integration tests (via `tdd-test-writer` agent)
+   - Unit tests (with mocks for external dependencies)
+   - Integration tests (minimum 20%, no mocks for code under test)
+7. **Verify Failures**: Confirm tests fail initially (NOT with AttributeError!)
+8. **Implement**: Code feature incrementally (via `tdd-solution-coder` agent)
+9. **Schema Compliance Check (NEW)**: Verify field names match schema
+10. **Verify Completeness**: All tests pass, no TODOs
+11. **Submit PR**: Create stacked PR via Graphite
+12. **Verify PR Base**: Ensure base branch is correct
+
+### Schema Discovery Process
+
+**Automated Method** (via ClaudeSessionManager):
+```python
+claude_mgr = ClaudeSessionManager()
+schema_reference = await claude_mgr.run_schema_discovery(
+    worktree_path=Path("/opt/work/feature-epic-580/issue-581"),
+    issue_number=581
+)
+```
+
+**Schema Reference Format**:
+```
+Model: MeetingState
+File: app/models/meeting/state.py
+Fields:
+  - meeting_id: str
+  - bot_id: str
+  - updated_at: datetime (NOT last_updated, NOT modified_at)
+  - entities_mentioned: Dict[str, List[str]] (keys: 'people', 'projects')
+  - body: str
+  - update_count: int
+  - is_finalized: bool (NOT finalized, NOT is_final)
+
+Common Errors to Avoid:
+  ❌ state.last_updated → ✅ state.updated_at
+  ❌ state.participant_entities → ✅ state.entities_mentioned['people']
+  ❌ state.finalized → ✅ state.is_finalized
+```
+
+### Integration Test Requirements
+
+**Minimum Coverage**: At least 20% of tests must be integration tests (no mocks for code under test).
+
+**Why Integration Tests**:
+- Unit tests with mocks hide implementation bugs
+- Integration tests call real methods and catch AttributeError
+- Required for: serialization, data models, field access
+
+**Example Integration Test**:
+```python
+@pytest.mark.integration
+def test_meeting_state_serialization(tmp_path):
+    """Integration: Verify MeetingState serializes with correct field names"""
+    state = MeetingState(
+        meeting_id="m1",
+        bot_id="b1",
+        updated_at=datetime.now(),
+        entities_mentioned={'people': ['Alice'], 'projects': ['P1']},
+        is_finalized=False
+    )
+
+    # Real serialization - catches field name errors
+    json_data = state.to_dict()
+
+    assert 'updated_at' in json_data  # NOT last_updated!
+    assert json_data['is_finalized'] is False  # NOT finalized!
+```
+
+**Automated Check** (via ClaudeSessionManager):
+```python
+coverage_ok = await claude_mgr.check_integration_test_coverage(
+    worktree_path=Path("/opt/work/feature-epic-580/issue-581"),
+    issue_number=581
+)
+# Returns True if >= 20%, False otherwise
+```
+
+### Schema Compliance Check
+
+**Purpose**: Verify all field access in implementation matches documented schema.
+
+**Automated Check** (via ClaudeSessionManager):
+```python
+compliance_ok = await claude_mgr.run_schema_compliance_check(
+    worktree_path=Path("/opt/work/feature-epic-580/issue-581"),
+    issue_number=581,
+    schema_reference=schema_reference  # From discovery step
+)
+# Returns False if violations found (BLOCKER)
+```
+
+**What It Checks**:
+1. Extracts all attribute access patterns from modified files
+2. Compares against documented schema reference
+3. Reports violations with file/line numbers
+4. Suggests fixes for each violation
+
+**Example Violation Report**:
+```
+VIOLATION in app/services/meeting.py:45
+❌ state.last_updated
+✅ state.updated_at
+Fix: Change line 45 from "state.last_updated" to "state.updated_at"
+```
+
+**Enforcement**: Schema compliance must pass with 100% before PR creation.
+
+### Integration with TDD Workflow
+
+The schema discovery and validation workflow is fully integrated into the automated TDD process:
+
+1. **Claude Automation** (`claude_automation.py`):
+   - `run_schema_discovery()`: Runs schema discovery
+   - `run_schema_compliance_check()`: Validates field access
+   - `check_integration_test_coverage()`: Ensures 20% minimum
+
+2. **Prompts** (`prompts.py`):
+   - `SCHEMA_DISCOVERY_PROMPT`: Guides schema documentation
+   - `SCHEMA_COMPLIANCE_CHECK_PROMPT`: Guides validation
+   - `INTEGRATION_TEST_PROMPT`: Guides integration test creation
+   - `TDD_WORKFLOW_PROMPT`: Orchestrates entire workflow
+
+3. **Agent Invocations**:
+   - `issue-analyzer`: Extracts requirements
+   - `tdd-test-writer`: Creates tests with schema context
+   - `tdd-solution-coder`: Implements with schema context
+   - `implementation-completeness-verifier`: Final validation
+
+### Best Practices
+
+1. **Always Run Schema Discovery First**: Before writing any tests or implementation
+2. **Pass Schema Reference to Agents**: Ensure test-writer and solution-coder have schema context
+3. **Never Guess Field Names**: Always reference the documented schema
+4. **Require Integration Tests**: Don't accept 100% mocked test suites
+5. **Block on Violations**: Don't proceed to PR if schema compliance fails
+6. **Include in Reviews**: Check for schema compliance during code reviews
+
+### Common Patterns and Pitfalls
+
+**Timestamp Fields**:
+- ❌ `.last_updated`, `.modified_at`, `.changed_at`
+- ✅ `.updated_at` (or whatever schema defines)
+
+**Boolean Fields**:
+- ❌ `.finalized`, `.completed`, `.active`
+- ✅ `.is_finalized`, `.is_completed`, `.is_active`
+
+**Collection Fields**:
+- ❌ `.participant_entities`, `.project_entities`
+- ✅ `.entities_mentioned['people']`, `.entities_mentioned['projects']`
+
+**Plural vs Singular**:
+- ❌ `.comment`, `.entity`
+- ✅ `.comments`, `.entities`
+
 ## Critical Implementation Notes
 
 ### Worktree Base Branches
@@ -496,3 +686,108 @@ Key settings:
 - TUI dashboard implementation
 
 **Testing Approach**: Following TDD methodology - write tests first, then implement incrementally.
+
+## Troubleshooting Graphite Stack Registration
+
+### Problem: PRs Don't Appear as a Unified Stack in Graphite Web UI
+
+**Symptoms**:
+- PRs exist on GitHub with correct base branches
+- Local `gt log --stack` shows correct stack structure
+- But Graphite web UI (app.graphite.dev) shows PRs as individual stacks of 1
+- No restack benefits or unified stack visualization
+
+**Root Cause**:
+Branches were pushed using regular `git push` instead of Graphite's `gt submit`. This means:
+- ✅ Git structure is correct (branches properly based on each other)
+- ✅ GitHub PR base branches are correct
+- ✅ Local Graphite CLI sees the stack
+- ❌ **Graphite backend has NO metadata about the stack**
+
+When you see this message from `gt repo sync`:
+```
+Branch issue-598 is up to date with remote, but the current remote version was not pushed with Graphite.
+Branch issue-599 is up to date with remote, but the current remote version was not pushed with Graphite.
+```
+
+This confirms the PRs are not registered with Graphite's backend.
+
+**Solution: Register PRs with Graphite Backend**
+
+Use the `epic sync-graphite` command to fix existing epics:
+
+```bash
+# Synchronize all PRs in an epic with Graphite's backend
+epic-mgr epic sync-graphite 597
+
+# What it does:
+# 1. Loads epic plan to find all issues and worktrees
+# 2. For each issue with an existing PR:
+#    - Checks out the branch in its worktree
+#    - Runs 'gt submit --no-edit --no-interactive'
+#    - This registers the PR with Graphite without changing anything
+# 3. Verifies stack structure after registration
+
+# Example output:
+# Syncing PR #607 (issue 598)...
+#   ✓ PR #607 registered with Graphite
+# Syncing PR #608 (issue 599)...
+#   ✓ PR #608 registered with Graphite
+#
+# Sync Summary
+# ✓ Synced: 3
+# ○ Skipped: 2
+#
+# ✓ All PRs synchronized successfully!
+# Check the Graphite web UI to see the unified stack
+```
+
+**Manual Fix (if command not available)**:
+
+```bash
+cd /opt/main  # Or your instance directory
+
+# For each branch with an existing PR:
+git checkout issue-598
+gt submit --no-edit --no-interactive  # Registers PR #607
+
+git checkout issue-599
+gt submit --no-edit --no-interactive  # Registers PR #608
+
+# Verify stack is now registered
+gt log --stack
+
+# Should now show proper stack in Graphite web UI
+```
+
+**Prevention: Always Use `gt submit`**
+
+To prevent this issue in the future, always create PRs using Graphite's submission command:
+
+```bash
+# ✅ CORRECT: Use gt submit to create PR
+gt submit --no-interactive --title "..." --body "..."
+
+# ❌ WRONG: Don't use git push + gh pr create
+git push origin issue-599
+gh pr create --title "..." --body "..."
+```
+
+**Why This Matters**:
+
+`gt submit` does TWO things:
+1. **Creates/updates the PR on GitHub** (what manual workflows do)
+2. **Registers the PR with Graphite's backend** (what manual workflows miss)
+
+Without step 2, Graphite's web UI can't:
+- Display stack relationships visually
+- Enable restacking across the stack
+- Show stack health and dependencies
+- Provide unified stack operations
+
+**TDD Workflow Integration**:
+
+The TDD workflow (`TDD_WORKFLOW_PROMPT`) now includes automatic verification in Step 10:
+- After PR creation, verify it appears in `gt log --stack`
+- If PR doesn't appear or shows as isolated, run `gt submit --no-edit --no-interactive`
+- This ensures every PR is properly registered from the start

@@ -1224,31 +1224,191 @@ class EpicOrchestrator:
 
         console.print("[blue]Syncing Graphite stack with git and GitHub...[/blue]")
 
-        # Run gt sync to fetch latest PR metadata from GitHub
-        console.print("[dim]  Running 'gt sync'...[/dim]")
-        sync_result = subprocess.run(
-            ["gt", "sync"],
-            cwd=str(instance_path),
-            capture_output=True,
-            text=True
-        )
+        # Step 1: Check current branch position
+        console.print("[dim]  Checking current branch position...[/dim]")
+        try:
+            branch_result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            current_branch = branch_result.stdout.strip()
+            console.print(f"[dim]    Current branch: {current_branch}[/dim]")
+        except subprocess.CalledProcessError as e:
+            console.print(f"[yellow]  ⚠ Could not determine current branch: {e}[/yellow]")
 
-        if sync_result.returncode != 0:
-            console.print(f"[yellow]  ⚠ gt sync had issues: {sync_result.stderr}[/yellow]")
-            # Don't fail hard - sync can have non-critical warnings
+        # Step 2: Run gt sync to fetch latest PR metadata from GitHub
+        console.print("[dim]  Running 'gt sync' to fetch PR metadata...[/dim]")
+        try:
+            sync_result = subprocess.run(
+                ["gt", "sync", "--no-interactive"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True,
+                timeout=60  # 60 second timeout to prevent hanging
+            )
 
-        # Run gt restack to rebuild stack structure based on current git state
-        console.print("[dim]  Running 'gt restack'...[/dim]")
-        restack_result = subprocess.run(
-            ["gt", "restack"],
-            cwd=str(instance_path),
-            capture_output=True,
-            text=True
-        )
+            if sync_result.returncode != 0:
+                console.print(f"[yellow]  ⚠ gt sync had issues: {sync_result.stderr}[/yellow]")
+                # Don't fail hard - sync can have non-critical warnings
+            else:
+                console.print("[dim]    ✓ PR metadata synced from GitHub[/dim]")
+        except subprocess.TimeoutExpired:
+            console.print("[yellow]  ⚠ gt sync timed out after 60 seconds[/yellow]")
+            # Continue anyway - sync failure is not critical
 
-        if restack_result.returncode != 0:
-            console.print(f"[yellow]  ⚠ gt restack had issues: {restack_result.stderr}[/yellow]")
-            # Don't fail hard - restack can have non-critical warnings
+        # Step 3: Check for conflicts before restack
+        console.print("[dim]  Checking for conflicts...[/dim]")
+        try:
+            status_result = subprocess.run(
+                ["gt", "status"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True
+            )
+            if "conflict" in status_result.stdout.lower():
+                console.print("[yellow]  ⚠ Conflicts detected in stack[/yellow]")
+            else:
+                console.print("[dim]    ✓ No conflicts detected[/dim]")
+        except Exception as e:
+            console.print(f"[dim]    Could not check status: {e}[/dim]")
 
-        console.print("[green]✓ Graphite stack synced[/green]")
+        # Step 4: Run gt restack to rebuild stack structure based on current git state
+        console.print("[dim]  Running 'gt restack' to rebuild stack structure...[/dim]")
+        try:
+            restack_result = subprocess.run(
+                ["gt", "restack", "--no-interactive"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True,
+                timeout=30  # 30 second timeout for restack
+            )
+
+            if restack_result.returncode != 0:
+                console.print(f"[yellow]  ⚠ gt restack had issues: {restack_result.stderr}[/yellow]")
+                # Don't fail hard - restack can have non-critical warnings
+            else:
+                console.print("[dim]    ✓ Stack structure rebuilt[/dim]")
+        except subprocess.TimeoutExpired:
+            console.print("[yellow]  ⚠ gt restack timed out after 30 seconds[/yellow]")
+            # Continue anyway - restack failure is not critical
+
+        # Step 5: Verify stack structure
+        console.print("[dim]  Verifying stack structure...[/dim]")
+        try:
+            ls_result = subprocess.run(
+                ["gt", "ls"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True
+            )
+            if ls_result.returncode == 0:
+                # Count branches in stack
+                branch_count = len([line for line in ls_result.stdout.split('\n') if line.strip()])
+                console.print(f"[dim]    ✓ Stack has {branch_count} branch(es)[/dim]")
+            else:
+                console.print("[dim]    Could not verify stack structure[/dim]")
+        except Exception as e:
+            console.print(f"[dim]    Could not list stack: {e}[/dim]")
+
+        console.print("[green]✓ Graphite stack synced successfully[/green]")
         return True
+
+    async def sync_epic_to_graphite(
+        self,
+        epic_number: int,
+        instance_name: str
+    ) -> bool:
+        """Sync epic PRs to Graphite backend by re-submitting them.
+
+        This fixes the issue where PRs exist on GitHub with correct base branches,
+        but don't appear as a unified stack in the Graphite web UI. This happens
+        when branches were pushed with 'git push' instead of 'gt submit'.
+
+        Args:
+            epic_number: Epic number to sync
+            instance_name: KB-LLM instance name
+
+        Returns:
+            True if all PRs were synced successfully, False if errors occurred
+        """
+        import subprocess
+
+        console.print(f"[blue]Syncing epic {epic_number} PRs to Graphite backend...[/blue]")
+
+        # Load epic plan to get all issues
+        plan = self.load_plan(epic_number)
+        if not plan:
+            console.print(f"[yellow]No plan found for epic {epic_number}[/yellow]")
+            return False
+
+        instance_path = Path(f"/opt/{instance_name}")
+        all_success = True
+        synced_count = 0
+        skipped_count = 0
+
+        for issue in plan.issues:
+            if not issue.pr_number:
+                console.print(f"[dim]Skipping issue {issue.number}: no PR number[/dim]")
+                skipped_count += 1
+                continue
+
+            if not issue.worktree_path:
+                console.print(f"[yellow]Skipping issue {issue.number}: no worktree path[/yellow]")
+                skipped_count += 1
+                continue
+
+            worktree_path = Path(issue.worktree_path)
+            if not worktree_path.exists():
+                console.print(f"[yellow]Skipping issue {issue.number}: worktree doesn't exist[/yellow]")
+                skipped_count += 1
+                continue
+
+            console.print(f"\n[blue]Syncing PR #{issue.pr_number} (issue {issue.number})...[/blue]")
+
+            try:
+                # Run gt submit --no-edit --no-interactive to register PR with Graphite
+                result = subprocess.run(
+                    ["gt", "submit", "--no-edit", "--no-interactive"],
+                    cwd=str(worktree_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+
+                if result.returncode == 0:
+                    console.print(f"[green]  ✓ PR #{issue.pr_number} registered with Graphite[/green]")
+                    synced_count += 1
+                else:
+                    console.print(f"[red]  ✗ Failed to sync PR #{issue.pr_number}[/red]")
+                    console.print(f"[dim]  Error: {result.stderr}[/dim]")
+                    all_success = False
+
+            except subprocess.TimeoutExpired:
+                console.print(f"[red]  ✗ Timeout syncing PR #{issue.pr_number}[/red]")
+                all_success = False
+            except Exception as e:
+                console.print(f"[red]  ✗ Error syncing PR #{issue.pr_number}: {e}[/red]")
+                all_success = False
+
+        # Summary
+        console.print(f"\n[bold cyan]Sync Summary[/bold cyan]")
+        console.print(f"[green]✓ Synced: {synced_count}[/green]")
+        console.print(f"[dim]○ Skipped: {skipped_count}[/dim]")
+
+        if all_success and synced_count > 0:
+            # Verify stack structure
+            console.print(f"\n[blue]Verifying stack structure in main repo...[/blue]")
+            self.sync_graphite_stack(instance_path)
+
+            console.print(f"\n[green]✓ All PRs synchronized successfully![/green]")
+            console.print("[blue]Check the Graphite web UI to see the unified stack:[/blue]")
+            console.print("[dim]https://app.graphite.dev/[/dim]")
+        elif synced_count > 0:
+            console.print(f"\n[yellow]⚠ Some PRs could not be synced[/yellow]")
+        else:
+            console.print(f"\n[yellow]No PRs were synced[/yellow]")
+
+        return all_success or synced_count > 0

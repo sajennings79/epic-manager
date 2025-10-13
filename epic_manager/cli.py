@@ -495,6 +495,62 @@ def build(config: Config, epic_number: int, auto_sync: bool, skip_checks: bool, 
         sys.exit(1)
 
 
+@epic.command(name="sync-graphite")
+@click.argument("epic_number", type=int)
+@pass_config
+def sync_graphite(config: Config, epic_number: int) -> None:
+    """Register existing PRs with Graphite's backend to fix stack display.
+
+    This command fixes the issue where PRs exist on GitHub with correct base
+    branches, but don't appear as a unified stack in the Graphite web UI. This
+    happens when branches were pushed with regular 'git push' instead of 'gt submit'.
+
+    The command:
+    1. Loads the epic plan to find all issues and their worktrees
+    2. For each issue with an existing PR:
+       - Checks out the branch
+       - Runs 'gt submit --no-edit --no-interactive' to register with Graphite
+    3. Verifies stack structure after registration
+
+    After running this command, the PRs will appear as a proper stack in the
+    Graphite web UI at app.graphite.dev.
+
+    Example:
+        epic-mgr epic sync-graphite 597
+    """
+    if not config.instance:
+        console.print("[red]No instance selected. Use 'epic-mgr select <instance>' first.[/red]")
+        return
+
+    async def run_sync():
+        try:
+            orchestrator = EpicOrchestrator(instance_name=config.instance)
+            success = await orchestrator.sync_epic_to_graphite(epic_number, config.instance)
+
+            if success:
+                console.print(f"[green]✓ Epic {epic_number} synchronized with Graphite backend[/green]")
+                console.print("[blue]PRs should now appear as a unified stack in Graphite web UI[/blue]")
+            else:
+                console.print(f"[yellow]⚠ Synchronization had some issues for epic {epic_number}[/yellow]")
+
+            return success
+
+        except Exception as e:
+            console.print(f"[red]Error synchronizing with Graphite: {e}[/red]")
+            if config.verbose:
+                raise
+            return False
+
+    console.print(f"[blue]Synchronizing epic {epic_number} with Graphite backend...[/blue]")
+    console.print("[dim]This will register all PRs with Graphite to fix stack display[/dim]\n")
+
+    # Run the async sync
+    success = asyncio.run(run_sync())
+
+    if not success:
+        sys.exit(1)
+
+
 @main.group()
 def work() -> None:
     """Worktree and issue management commands."""
