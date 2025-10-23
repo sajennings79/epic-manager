@@ -26,6 +26,7 @@ class Constants:
     # Review monitoring
     REVIEW_POLL_INTERVAL: int = int(os.getenv("EPIC_MGR_POLL_INTERVAL", "60"))
     CODERABBIT_USERNAME: str = os.getenv("EPIC_MGR_CODERABBIT_USER", "coderabbitai")
+    MAX_FIX_ATTEMPTS: int = int(os.getenv("EPIC_MGR_MAX_FIX_ATTEMPTS", "5"))
 
     # External tool commands
     GRAPHITE_COMMAND: str = os.getenv("EPIC_MGR_GT_CMD", "gt")

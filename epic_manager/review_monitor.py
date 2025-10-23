@@ -216,60 +216,150 @@ class ReviewMonitor:
             console.print(f"[dim]Error checking PR #{pr_number}: {e}[/dim]")
             return False
 
+    async def _count_coderabbit_comments(self, pr_number: int, instance_path: Path) -> int:
+        """Count the number of CodeRabbit comments on a PR.
+
+        Args:
+            pr_number: PR number to check
+            instance_path: Path to the instance repository
+
+        Returns:
+            Number of CodeRabbit comments (0 if none or error)
+        """
+        try:
+            result = subprocess.run([
+                self.gh_command, "pr", "view", str(pr_number),
+                "--json", "comments"
+            ], capture_output=True, text=True, cwd=str(instance_path))
+
+            if result.returncode != 0:
+                return 0
+
+            data = json.loads(result.stdout)
+            comments = data.get('comments', [])
+
+            # Count CodeRabbit comments
+            return sum(
+                1 for comment in comments
+                if comment.get('author', {}).get('login') == self.coderabbit_username
+            )
+
+        except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError) as e:
+            return 0
+
     async def monitor_epic_reviews(
         self,
         plan: EpicPlan,
         worktrees: Dict[int, Path],
-        instance_path: Path
+        instance_path: Path,
+        epic_number: Optional[int] = None
     ) -> None:
         """Monitor PRs for an epic and trigger fixes when CodeRabbit comments appear.
+
+        Continuously polls PRs, launches fixes when comments are found, and iterates
+        until all PRs have 0 CodeRabbit comments. Discovers new PRs dynamically.
 
         Args:
             plan: Epic plan with issue information
             worktrees: Mapping of issue_number -> worktree_path
             instance_path: Path to the instance repository
+            epic_number: Epic issue number for dynamic PR discovery (optional)
         """
-        # Collect PRs to monitor
-        prs_to_monitor = [issue.pr_number for issue in plan.issues if issue.pr_number]
-        if not prs_to_monitor:
-            console.print("[yellow]No PRs found for this epic[/yellow]")
-            return
-
-        console.print(f"[blue]Monitoring {len(prs_to_monitor)} PR(s): {', '.join(f'#{pr}' for pr in prs_to_monitor)}[/blue]")
-        console.print(f"[dim]Polling every {self.poll_interval} seconds...[/dim]")
-
-        addressed = set()
+        # Initialize tracking state
+        addressed = set()  # PRs with 0 comments (truly clean)
+        fix_attempts: Dict[int, int] = {}  # PR -> attempt count
+        fixes_launched_this_poll: Set[int] = set()  # Track fixes launched in current poll
         poll_count = 0
+
+        # Get epic number from plan if not provided
+        if epic_number is None and hasattr(plan, 'epic_number'):
+            epic_number = plan.epic_number
+
+        console.print(f"[dim]Polling every {self.poll_interval} seconds...[/dim]")
+        console.print(f"[dim]Max fix attempts per PR: {Constants.MAX_FIX_ATTEMPTS}[/dim]\n")
 
         while True:
             poll_count += 1
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             console.print(f"\n[dim][{timestamp}] Poll #{poll_count}[/dim]")
 
-            # Phase 1: Scan all PRs to identify which have CodeRabbit comments
+            # Phase 0: Discover PRs dynamically (find new PRs added during monitoring)
+            if epic_number:
+                console.print(f"[dim]  Discovering PRs for epic #{epic_number}...[/dim]")
+                issue_to_pr = await self._discover_epic_prs(epic_number, instance_path)
+
+                # Update plan with newly discovered PRs
+                new_prs_found = 0
+                for issue in plan.issues:
+                    if issue.number in issue_to_pr:
+                        discovered_pr = issue_to_pr[issue.number]
+                        if not issue.pr_number:
+                            # New PR discovered!
+                            issue.pr_number = discovered_pr
+                            new_prs_found += 1
+                            console.print(f"[green]  ✓ New PR discovered: Issue #{issue.number} → PR #{discovered_pr}[/green]")
+
+                if new_prs_found > 0:
+                    console.print(f"[green]  Found {new_prs_found} new PR(s) during this poll[/green]")
+
+            # Collect current PRs to monitor
+            prs_to_monitor = [issue.pr_number for issue in plan.issues if issue.pr_number]
+
+            if not prs_to_monitor:
+                console.print("[yellow]No PRs found for this epic[/yellow]")
+                await asyncio.sleep(self.poll_interval)
+                continue
+
+            # Display current monitoring status
+            console.print(f"[blue]Monitoring {len(prs_to_monitor)} PR(s): {', '.join(f'#{pr}' for pr in prs_to_monitor)}[/blue]")
+            console.print(f"[dim]  Clean: {len(addressed)}, Need attention: {len(prs_to_monitor) - len(addressed)}[/dim]")
+
+            # Phase 1: Scan all PRs to check CodeRabbit comment status
             prs_needing_fixes = []
             checked_count = 0
 
             for issue in plan.issues:
-                if issue.pr_number and issue.pr_number not in addressed:
-                    console.print(f"[dim]  Checking PR #{issue.pr_number} for CodeRabbit comments...[/dim]", end=" ")
+                if not issue.pr_number:
+                    continue
 
-                    has_comments = await self._has_new_coderabbit_comments(
-                        issue.pr_number, instance_path
-                    )
+                pr_num = issue.pr_number
 
-                    if has_comments:
-                        console.print("[yellow]✓ Found comments![/yellow]")
-                        prs_needing_fixes.append((issue.number, issue.pr_number))
+                # Skip if already clean
+                if pr_num in addressed:
+                    continue
+
+                # Skip if max attempts reached
+                if fix_attempts.get(pr_num, 0) >= Constants.MAX_FIX_ATTEMPTS:
+                    console.print(f"[red]  PR #{pr_num}: Max attempts ({Constants.MAX_FIX_ATTEMPTS}) reached, skipping[/red]")
+                    continue
+
+                console.print(f"[dim]  Checking PR #{pr_num} for CodeRabbit comments...[/dim]", end=" ")
+
+                # Count comments (not just check existence)
+                comment_count = await self._count_coderabbit_comments(pr_num, instance_path)
+
+                if comment_count > 0:
+                    attempts = fix_attempts.get(pr_num, 0)
+                    console.print(f"[yellow]✓ {comment_count} comment(s) (attempt {attempts + 1}/{Constants.MAX_FIX_ATTEMPTS})[/yellow]")
+
+                    # Check if worktree exists for this issue
+                    if issue.number not in worktrees:
+                        console.print(f"[yellow]  ⚠ No worktree for issue #{issue.number}, cannot auto-fix[/yellow]")
                     else:
-                        console.print("[dim]No new comments[/dim]")
+                        prs_needing_fixes.append((issue.number, pr_num))
+                else:
+                    # 0 comments = truly addressed!
+                    console.print("[green]✓ Clean (0 comments)[/green]")
+                    addressed.add(pr_num)
 
-                    checked_count += 1
+                checked_count += 1
 
             if checked_count == 0:
-                console.print(f"[dim]  All {len(prs_to_monitor)} PR(s) already addressed[/dim]")
+                console.print(f"[dim]  All {len(prs_to_monitor)} PR(s) already clean or at max attempts[/dim]")
 
-            # Phase 2: Launch all fixes in parallel
+            # Phase 2: Launch fixes for PRs with comments
+            fixes_launched_this_poll = set()
+
             if prs_needing_fixes:
                 console.print(f"\n[blue]Launching {len(prs_needing_fixes)} CodeRabbit fix workflow(s) in parallel...[/blue]")
 
@@ -283,17 +373,32 @@ class ReviewMonitor:
                     max_concurrent=Constants.MAX_CONCURRENT_SESSIONS
                 )
 
-                # Process results
+                # Process results (DO NOT mark as addressed yet - wait for CodeRabbit response)
                 for (issue_num, pr_num), result in zip(prs_needing_fixes, results):
-                    if result.success:
-                        addressed.add(pr_num)
-                        console.print(f"[green]✓ Addressed review comments for PR #{pr_num}[/green]")
-                    else:
-                        console.print(f"[red]✗ Failed to address comments for PR #{pr_num}: {result.error}[/red]")
+                    # Increment attempt counter
+                    fix_attempts[pr_num] = fix_attempts.get(pr_num, 0) + 1
 
-            # Check if all PRs have been addressed
-            if len(addressed) == len(prs_to_monitor):
-                console.print(f"\n[green]All {len(prs_to_monitor)} PR(s) addressed. Monitoring complete![/green]")
+                    if result.success:
+                        console.print(f"[green]✓ Fix workflow completed for PR #{pr_num}[/green]")
+                        fixes_launched_this_poll.add(pr_num)
+                    else:
+                        console.print(f"[red]✗ Fix workflow failed for PR #{pr_num}: {result.error}[/red]")
+
+                # Inform user that we'll continue polling
+                if fixes_launched_this_poll:
+                    console.print(f"\n[blue]Fixes launched for {len(fixes_launched_this_poll)} PR(s). Continuing to poll for CodeRabbit responses...[/blue]")
+
+            # Phase 3: Check completion criteria
+            # Only exit when ALL PRs have 0 comments (are in 'addressed' set)
+            if len(addressed) >= len(prs_to_monitor):
+                console.print(f"\n[green]✓ All {len(prs_to_monitor)} PR(s) have 0 CodeRabbit comments. Monitoring complete![/green]")
+                break
+
+            # Check if we're stuck (all PRs either addressed or at max attempts)
+            still_working = len([pr for pr in prs_to_monitor if pr not in addressed and fix_attempts.get(pr, 0) < Constants.MAX_FIX_ATTEMPTS])
+            if still_working == 0:
+                console.print(f"\n[yellow]All remaining PRs have reached max fix attempts. Stopping monitoring.[/yellow]")
+                console.print(f"[dim]  Clean: {len(addressed)}, Max attempts: {len([pr for pr in prs_to_monitor if fix_attempts.get(pr, 0) >= Constants.MAX_FIX_ATTEMPTS])}[/dim]")
                 break
 
             console.print(f"[dim]  Next check in {self.poll_interval} seconds...[/dim]")

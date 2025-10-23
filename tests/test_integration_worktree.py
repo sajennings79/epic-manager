@@ -142,7 +142,7 @@ class TestWorktreeCreation:
 
         # Should not raise exception despite Graphite failure
         try:
-            workspace_manager._track_in_graphite(Path("/test/path"), "test-branch")
+            workspace_manager._track_in_graphite(Path("/test/path"), "test-branch", "main")
         except Exception as e:
             pytest.fail(f"Graphite tracking failure should be non-critical: {e}")
 

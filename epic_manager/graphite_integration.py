@@ -109,14 +109,14 @@ class GraphiteManager:
         try:
             # Sync with remote
             sync_result = subprocess.run([
-                self.gt_command, "sync"
+                self.gt_command, "sync", "--no-interactive"
             ], cwd=worktree_path, capture_output=True, text=True, check=True)
 
             console.print("[blue]Stack synced with remote[/blue]")
 
             # Restack branches
             restack_result = subprocess.run([
-                self.gt_command, "restack"
+                self.gt_command, "restack", "--no-interactive"
             ], cwd=worktree_path, capture_output=True, text=True, check=True)
 
             console.print("[blue]Stack restacked[/blue]")

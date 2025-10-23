@@ -18,10 +18,18 @@
       "Bash(isort:*)",
       "Bash(git checkout:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh pr create --title \"Epic Manager: Core enhancements and bug fixes\" --body \"$(cat <<''EOF''\n## Summary\n\nMajor enhancements to epic-manager including state management refactoring, epic resumption, PR verification, Graphite sync integration, and comprehensive documentation.\n\n## Key Features\n\n### 1. Instance-Specific State Storage\n- Moved state from `/opt/epic-manager/data/state/` to `/opt/{instance}/.epic-mgr/state/`\n- Prevents permission errors when managing instances owned by different users\n- Clean separation: state lives with the instance it manages\n- Multi-instance scanning in `epic status` command\n\n### 2. Epic Resumption  \n- Automatically detect existing PRs via `gh pr list`\n- Skip completed issues when resuming epic workflow\n- Load existing plan instead of re-analyzing  \n- Only run TDD workflows for incomplete issues\n- Example: `epic-mgr epic start 580` resumes from last incomplete issue\n\n### 3. PR Base Branch Verification\n- Auto-verify PR base branches match epic plan after creation\n- Fix PRs incorrectly targeting main instead of parent branch\n- New command: `epic-mgr epic verify-prs <epic_number>`\n- Integrated into TDD workflow (Step 10)\n- Prevents broken Graphite stacks on GitHub\n\n### 4. Graphite Stack Sync\n- Integrate `gt sync` and `gt restack` into workflow\n- Run after worktree creation and PR fixes\n- Added as Step 1 in TDD workflow prompts\n- Ensures Graphite metadata stays in sync with git\n- Prevents \"unknown parent\" warnings\n\n### 5. PR Discovery Bug Fix\n- Filter CSS color codes from issue number detection  \n- Bug: Tailwind colors like #374151 were parsed as issue numbers\n- Was showing \"36 linked issues\" instead of \"5\" for epic 580\n- Fix: Filter numbers >100,000 and remove duplicates\n\n## Documentation\n\nAdded comprehensive guides:\n- Epic resumption workflow with examples\n- PR base branch verification guide\n- Epic build and integration testing workflow\n- Troubleshooting guides for common issues  \n- State management details\n- Build options and diagrams\n\n## Testing\n\nTested with epic 580 (5 stacked PRs, issues 581-585):\n- ✅ Epic resumption skipped completed issues (581-582)\n- ✅ PR base branch verification fixed incorrect targets\n- ✅ Graphite sync integrated successfully\n- ✅ PR discovery filtered color codes correctly  \n- ✅ Epic build created integration branch successfully\n\n## Commits\n\n1. `refactor`: Move state storage to instance directories\n2. `feat`: Integrate Graphite sync into workflow\n3. `fix`: Bug fixes for PR discovery and error handling\n4. `docs`: Add comprehensive workflow documentation\n5. `chore`: Update supporting modules and configuration\n\n## Files Changed\n\n- 12 files modified\n- ~1200 lines added\n- ~250 lines removed\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\nEOF\n)\")",
+      "Bash(gh api:*)",
+      "Bash(sudo git -C /opt/work/main-epic-597/issue-599 status --short)",
+      "Bash(for pr in 607 608 610 611 612 613)",
+      "Bash(do echo \"=== PR #$pr ===\")",
+      "Bash(gh pr edit:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []
   },
-  "outputStyle": "yaml"
+  "outputStyle": "default"
 }

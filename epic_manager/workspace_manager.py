@@ -435,21 +435,19 @@ class WorkspaceManager:
 
         Note:
             This is non-critical - Claude can track the branch later if this fails.
-            Graphite infers parent relationships from git's branch structure automatically
-            when you run 'gt track'. The parent detection works once branches have
-            diverged (have different commits).
+            Explicitly specifies parent branch when tracking to ensure proper stack setup.
+            This is critical for newly created branches before they have commits.
         """
         try:
-            # Track the branch in Graphite
-            # Graphite will infer the parent from git's branch point automatically
+            # Track the branch in Graphite with explicit parent specification
             result = subprocess.run([
-                "gt", "track", branch_name
+                "gt", "track", branch_name, "--parent", base_branch
             ], cwd=str(worktree_path), capture_output=True, text=True, timeout=10)
 
             if result.returncode == 0:
                 console.print(f"[blue]Branch {branch_name} tracked in Graphite[/blue]")
                 if base_branch != "main":
-                    console.print(f"[dim]  Graphite will infer parent ({base_branch}) from git structure[/dim]")
+                    console.print(f"[dim]  Parent: {base_branch}[/dim]")
             else:
                 console.print(f"[yellow]Could not track in Graphite (non-critical): {result.stderr}[/yellow]")
 

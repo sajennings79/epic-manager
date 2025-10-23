@@ -165,6 +165,77 @@ class EpicPlan:
                 issue.status = new_status
                 break
 
+    def get_dependency_chains(self) -> List[List[int]]:
+        """Identify independent dependency chains for sequential execution.
+
+        A dependency chain is a sequence of issues where each issue depends on
+        the previous one. Issues within a chain must be executed sequentially
+        to ensure parent PRs exist before creating child PRs (required for
+        Graphite stacking).
+
+        Independent chains (no shared dependencies) can be executed in parallel.
+
+        Example:
+            Issues: [581, 582, 583, 584, 585]
+            Dependencies: 582→581, 583→582, 585→584
+            Returns: [[581, 582, 583], [584, 585]]
+                     Chain 1: 581 → 582 → 583 (sequential)
+                     Chain 2: 584 → 585 (sequential, parallel to Chain 1)
+
+        Returns:
+            List of chains, where each chain is a list of issue numbers in
+            dependency order (parent first, children after).
+        """
+        # Build dependency graph
+        issue_map = {issue.number: issue for issue in self.issues}
+        children = {}  # parent_issue -> [child_issues]
+        has_parent = set()  # issues that have dependencies
+
+        for issue in self.issues:
+            if issue.dependencies:
+                has_parent.add(issue.number)
+                for dep in issue.dependencies:
+                    if dep not in children:
+                        children[dep] = []
+                    children[dep].append(issue.number)
+
+        # Find root issues (no dependencies)
+        roots = [issue.number for issue in self.issues if issue.number not in has_parent]
+
+        # Build chains by traversing from each root
+        chains = []
+        visited = set()
+
+        def build_chain(start_issue: int) -> List[int]:
+            """Build chain starting from a root issue via DFS."""
+            chain = []
+            stack = [start_issue]
+
+            while stack:
+                current = stack.pop(0)  # BFS to maintain order
+                if current in visited:
+                    continue
+
+                visited.add(current)
+                chain.append(current)
+
+                # Add direct children to continue chain
+                if current in children:
+                    # Sort children by issue number for deterministic ordering
+                    for child in sorted(children[current]):
+                        if child not in visited:
+                            stack.append(child)
+
+            return chain
+
+        for root in sorted(roots):  # Sort for deterministic ordering
+            if root not in visited:
+                chain = build_chain(root)
+                if chain:
+                    chains.append(chain)
+
+        return chains
+
 
 @dataclass
 class WorkflowResult:

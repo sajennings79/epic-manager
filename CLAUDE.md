@@ -81,6 +81,49 @@ flake8 epic_manager/ tests/
 
 ## Architecture
 
+### Execution Model: Chain-Based Sequential Stacking
+
+Epic Manager uses **dependency chain execution** to ensure proper Graphite PR stacking:
+
+**Key Concepts:**
+- **Dependency Chain**: Sequence of issues where each depends on the previous (e.g., 581 → 582 → 583)
+- **Sequential Within Chain**: Issues in a chain execute one at a time, waiting for parent PR creation
+- **Parallel Across Chains**: Independent chains run concurrently for performance
+
+**Why Sequential Execution Matters:**
+
+When `gt submit` creates a PR, Graphite determines the base branch from git ancestry. If the parent PR doesn't exist on GitHub yet, Graphite falls back to targeting `main`, breaking the stack. By executing chains sequentially and verifying PR existence between steps, we ensure:
+- ✅ Parent PR exists before child PR creation
+- ✅ Correct base branches (issue-582 targets issue-581, not main)
+- ✅ Proper stack visualization in Graphite web UI
+
+**Example Execution:**
+
+Given epic with dependencies: 582→581, 583→582, 585→584
+
+```
+Chains Identified:
+  Chain 1: [581 → 582 → 583]  (sequential)
+  Chain 2: [584 → 585]         (sequential, parallel to Chain 1)
+
+Execution Flow:
+1. Start Chain 1 and Chain 2 in parallel
+2. Chain 1:
+   - Run TDD for 581 → Create PR #601 → Verify PR exists
+   - Run TDD for 582 → Create PR #602 (targets issue-581) → Verify PR exists
+   - Run TDD for 583 → Create PR #603 (targets issue-582)
+3. Chain 2 (concurrent with Chain 1):
+   - Run TDD for 584 → Create PR #604 → Verify PR exists
+   - Run TDD for 585 → Create PR #605 (targets issue-584)
+
+Result: All PRs properly stacked ✅
+```
+
+**Performance:**
+- Best case (all independent): Full parallelism
+- Worst case (single chain): Sequential execution
+- Typical (2-3 chains): Good parallelism with correct stacking
+
 ### Module Structure
 
 The codebase follows a modular architecture with clear separation of concerns:
@@ -106,28 +149,42 @@ epic_manager/
 1. **CLI entry** (`cli.py`): User runs `epic-mgr epic start 355`
 2. **Orchestrator** (`orchestrator.py`): Coordinates the workflow
    - Calls `analyze_epic()` to get JSON plan from Claude Code
-   - Parses JSON into `EpicPlan` model (defines phases and dependencies)
+   - Parses JSON into `EpicPlan` model (defines dependencies via `base_branch` field)
    - Calls `create_worktrees_for_plan()` to create isolated environments
-   - Calls `start_development()` to launch phase-based execution
+   - Calls `start_development()` to launch **chain-based execution**
 3. **Workspace Manager** (`workspace_manager.py`): Creates worktrees
    - For each issue: `git worktree add -b issue-{N} {path} {base_branch}`
+   - Base branch determines git ancestry (e.g., issue-582 branches from issue-581)
    - Tracks worktrees via `git worktree list --porcelain`
-4. **Claude Automation** (`claude_automation.py`): Launches TDD workflows
-   - Uses Claude Code SDK to run `/graphite-tdd {issue_number}` in each worktree
+4. **Chain Identification** (`models.py`): EpicPlan analyzes dependencies
+   - Calls `plan.get_dependency_chains()` to identify independent chains
+   - Chains are sequences like [581 → 582 → 583] where each depends on previous
+   - Independent chains can run in parallel
+5. **Chain Execution** (`orchestrator.py`): Sequential within chain, parallel across
+   - For each chain: Execute issues sequentially
+   - Between sequential steps: Verify parent PR exists via `_verify_pr_exists()`
+   - Independent chains run concurrently via `asyncio.gather()`
+6. **Claude Automation** (`claude_automation.py`): Launches TDD workflows
+   - Uses Claude Code SDK with explicit TDD workflow prompt
    - Streams progress output to console
-   - Returns `WorkflowResult` with success status and timing
-5. **Graphite Integration** (`graphite_integration.py`): Manages PR stacks
-   - Creates stacked PRs with proper base branches
+   - Extracts PR number from output via `_extract_pr_number_from_output()`
+   - Returns `WorkflowResult` with success status, timing, and PR number
+7. **PR Verification** (`orchestrator.py`): Ensures parent PRs exist
+   - After each issue completes, verifies PR exists on GitHub
+   - Retries with exponential backoff to handle GitHub API lag
+   - Only proceeds to dependent issue after parent PR confirmed
+8. **Graphite Integration** (`graphite_integration.py`): Manages PR stacks
+   - Creates stacked PRs with proper base branches (via `gt submit`)
    - Syncs and restacks when main branch changes
-6. **Review Monitor** (`review_monitor.py`): Handles CodeRabbit feedback
+9. **Review Monitor** (`review_monitor.py`): Handles CodeRabbit feedback
    - Polls GitHub API for CodeRabbit comments (60s intervals)
    - Creates review fix worktrees when comments appear
    - Launches Claude Code to address feedback automatically
-7. **PR Base Branch Verification** (`orchestrator.py`): Ensures stack integrity
-   - Automatically verifies PR base branches after creation
-   - Fixes PRs that incorrectly target `main` instead of parent branch
-   - Prevents broken Graphite stacks on GitHub
-   - Can be manually triggered: `epic-mgr epic verify-prs <epic_number>`
+10. **PR Base Branch Verification** (`orchestrator.py`): Ensures stack integrity
+    - Automatically verifies PR base branches after creation
+    - Fixes PRs that incorrectly target `main` instead of parent branch
+    - Prevents broken Graphite stacks on GitHub
+    - Can be manually triggered: `epic-mgr epic verify-prs <epic_number>`
 
 ### PR Base Branch Verification
 

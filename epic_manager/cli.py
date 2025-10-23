@@ -1149,8 +1149,8 @@ def monitor(config: Config, epic_number: int) -> None:
                     # Monitor without worktrees (can't auto-fix)
                     await monitor.monitor_epic_by_discovery(epic_number, config.instance, instance_path)
                 else:
-                    # Use plan-based monitoring with worktrees
-                    await monitor.monitor_epic_reviews(plan, worktrees, instance_path)
+                    # Use plan-based monitoring with worktrees (pass epic_number for dynamic PR discovery)
+                    await monitor.monitor_epic_reviews(plan, worktrees, instance_path, epic_number=epic_number)
             else:
                 console.print(f"[blue]No epic plan found - discovering PRs from GitHub[/blue]")
 

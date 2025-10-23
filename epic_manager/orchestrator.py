@@ -256,16 +256,67 @@ class EpicOrchestrator:
 
         return sorted(active_epics, key=lambda e: e.created_at or "")
 
+    async def _verify_pr_exists(
+        self,
+        pr_number: int,
+        instance_path: Path,
+        max_retries: int = 5
+    ) -> bool:
+        """Verify PR exists on GitHub before proceeding to dependent issue.
+
+        Handles GitHub API lag by retrying with exponential backoff.
+
+        Args:
+            pr_number: PR number to verify
+            instance_path: Path to the instance repository
+            max_retries: Maximum number of retry attempts (default: 5)
+
+        Returns:
+            True if PR exists, False if not found after retries
+        """
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                result = subprocess.run(
+                    ["gh", "pr", "view", str(pr_number), "--json", "number"],
+                    cwd=str(instance_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode == 0:
+                    console.print(f"[green]✓ PR #{pr_number} verified on GitHub[/green]")
+                    return True
+
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                console.print(f"[yellow]PR #{pr_number} not found (attempt {attempt + 1}/{max_retries})[/yellow]")
+
+            # Exponential backoff: 2s, 4s, 8s, 16s, 32s
+            if attempt < max_retries - 1:
+                delay = 2 ** (attempt + 1)
+                console.print(f"[dim]Waiting {delay}s before retry...[/dim]")
+                time.sleep(delay)
+
+        console.print(f"[red]✗ PR #{pr_number} not found after {max_retries} attempts[/red]")
+        return False
+
     async def start_development(
         self,
         plan: EpicPlan,
         worktrees: Dict[int, Path],
         existing_prs: Optional[Dict[int, int]] = None
     ) -> Dict[int, WorkflowResult]:
-        """Launch TDD workflows respecting dependency phases.
+        """Launch TDD workflows respecting dependency chains.
+
+        Uses chain-based execution instead of phase-based to ensure proper
+        Graphite PR stacking. Issues within a dependency chain execute
+        sequentially (child waits for parent PR), while independent chains
+        run in parallel.
 
         Args:
-            plan: Epic plan with phase information
+            plan: Epic plan with dependency information
             worktrees: Mapping of issue_number -> worktree_path
             existing_prs: Optional mapping of issue_number -> pr_number for already completed issues
 
@@ -276,47 +327,96 @@ class EpicOrchestrator:
             existing_prs = {}
 
         claude_mgr = ClaudeSessionManager()
-        results = {}
+        instance_path = Path(f"/opt/{plan.epic.instance}")
 
-        # Process phases sequentially (dependencies)
-        for phase_name in plan.get_phase_order():
-            issues_in_phase = plan.get_issues_for_phase(phase_name)
-            console.print(f"[green]Phase {phase_name}: {[i.number for i in issues_in_phase]}[/green]")
+        # Step 1: Identify independent dependency chains
+        chains = plan.get_dependency_chains()
+        console.print(f"[cyan]Identified {len(chains)} dependency chain(s) for epic {plan.epic.number}[/cyan]")
+        for i, chain in enumerate(chains, 1):
+            console.print(f"[blue]  Chain {i}: {' → '.join(map(str, chain))}[/blue]")
 
-            # Filter out issues that already have PRs
-            phase_tasks = []
-            for issue in issues_in_phase:
-                if issue.number in worktrees:
-                    if issue.number in existing_prs:
-                        console.print(f"[blue]  Issue {issue.number} already has PR #{existing_prs[issue.number]}, skipping[/blue]")
-                        # Create a success result for the skipped issue
-                        results[issue.number] = WorkflowResult(
-                            issue_number=issue.number,
-                            success=True,
-                            duration_seconds=0.0,
-                            pr_number=existing_prs[issue.number]
-                        )
-                    else:
-                        console.print(f"[yellow]  Issue {issue.number} needs TDD workflow[/yellow]")
-                        phase_tasks.append((worktrees[issue.number], issue.number))
+        # Step 2: Execute each chain sequentially, chains in parallel
+        async def execute_chain(chain: List[int], chain_num: int) -> List[WorkflowResult]:
+            """Execute issues in a dependency chain sequentially."""
+            console.print(f"[green]Starting Chain {chain_num}: {chain}[/green]")
+            chain_results = []
 
-            if not phase_tasks:
-                console.print(f"[blue]All issues in phase {phase_name} already complete[/blue]")
-                continue
+            for issue_num in chain:
+                # Skip if already has PR
+                if issue_num in existing_prs:
+                    console.print(f"[blue]  Issue {issue_num} already has PR #{existing_prs[issue_num]}, skipping[/blue]")
+                    chain_results.append(WorkflowResult(
+                        issue_number=issue_num,
+                        success=True,
+                        duration_seconds=0.0,
+                        pr_number=existing_prs[issue_num]
+                    ))
+                    continue
 
-            phase_results = await claude_mgr.run_parallel_tdd_workflows(
-                phase_tasks,
-                max_concurrent=Constants.MAX_CONCURRENT_SESSIONS
-            )
+                # Verify worktree exists
+                if issue_num not in worktrees:
+                    console.print(f"[red]  Issue {issue_num} missing worktree, skipping chain[/red]")
+                    chain_results.append(WorkflowResult(
+                        issue_number=issue_num,
+                        success=False,
+                        duration_seconds=0.0,
+                        error="Worktree not found"
+                    ))
+                    break  # Stop processing this chain
 
-            # Check for failures
-            for result in phase_results:
-                results[result.issue_number] = result
+                # Run TDD workflow and WAIT for completion
+                console.print(f"[yellow]  Executing TDD workflow for issue {issue_num}[/yellow]")
+                result = await claude_mgr.launch_tdd_workflow(
+                    worktrees[issue_num],
+                    issue_num
+                )
+                chain_results.append(result)
+
+                # Check for failure
                 if not result.success:
-                    console.print(f"[red]Phase {phase_name} failed on issue {result.issue_number}: {result.error}[/red]")
-                    return results  # Stop on phase failure
+                    console.print(f"[red]  Issue {issue_num} failed: {result.error}[/red]")
+                    console.print(f"[red]  Stopping Chain {chain_num}[/red]")
+                    break  # Stop processing this chain
+
+                # CRITICAL: Verify PR was created before continuing to next in chain
+                if result.pr_number:
+                    console.print(f"[blue]  Issue {issue_num} completed, PR #{result.pr_number} created[/blue]")
+
+                    # Verify PR exists on GitHub (handles API lag)
+                    pr_verified = await self._verify_pr_exists(
+                        result.pr_number,
+                        instance_path
+                    )
+
+                    if not pr_verified:
+                        console.print(f"[red]  Could not verify PR #{result.pr_number} on GitHub[/red]")
+                        console.print(f"[red]  Stopping Chain {chain_num} to prevent stacking issues[/red]")
+                        break  # Stop processing this chain
                 else:
-                    console.print(f"[green]Issue {result.issue_number} completed successfully[/green]")
+                    console.print(f"[yellow]  Issue {issue_num} completed but no PR number returned[/yellow]")
+                    # Continue anyway - might be manual testing or PR created outside workflow
+
+            console.print(f"[green]Chain {chain_num} completed: {len(chain_results)}/{len(chain)} issues processed[/green]")
+            return chain_results
+
+        # Step 3: Run all chains in parallel
+        console.print(f"[cyan]Executing {len(chains)} chain(s) in parallel...[/cyan]")
+        chain_tasks = [
+            execute_chain(chain, i + 1)
+            for i, chain in enumerate(chains)
+        ]
+        all_chain_results = await asyncio.gather(*chain_tasks)
+
+        # Step 4: Flatten results into single dict
+        results = {}
+        for chain_results in all_chain_results:
+            for result in chain_results:
+                results[result.issue_number] = result
+
+        # Summary
+        successful = sum(1 for r in results.values() if r.success)
+        total = len(results)
+        console.print(f"[cyan]Development completed: {successful}/{total} issues successful[/cyan]")
 
         return results
 
@@ -1203,6 +1303,69 @@ class EpicOrchestrator:
 
         return all_correct or fixes_made > 0
 
+    def _get_worktree_branches(self, instance_path: Path) -> List[str]:
+        """Get list of branches currently checked out in worktrees.
+
+        Args:
+            instance_path: Path to the main repository
+
+        Returns:
+            List of branch names checked out in worktrees
+        """
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            branches = []
+            for line in result.stdout.split('\n'):
+                # Parse lines like "branch refs/heads/issue-598"
+                if line.startswith('branch '):
+                    branch_ref = line.split()[1]
+                    # Extract branch name from refs/heads/branch-name
+                    if branch_ref.startswith('refs/heads/'):
+                        branch_name = branch_ref.replace('refs/heads/', '')
+                        branches.append(branch_name)
+
+            return branches
+
+        except subprocess.CalledProcessError as e:
+            console.print(f"[yellow]Could not list worktrees: {e}[/yellow]")
+            return []
+
+    def _run_restack(self, instance_path: Path) -> None:
+        """Run gt restack to rebuild stack structure.
+
+        Args:
+            instance_path: Path to the repository
+        """
+        import subprocess
+
+        console.print("[dim]  Running 'gt restack' to rebuild stack structure...[/dim]")
+        try:
+            restack_result = subprocess.run(
+                ["gt", "restack", "--no-interactive"],
+                cwd=str(instance_path),
+                capture_output=True,
+                text=True,
+                timeout=30  # 30 second timeout for restack
+            )
+
+            if restack_result.returncode != 0:
+                console.print(f"[yellow]  ⚠ gt restack had issues: {restack_result.stderr}[/yellow]")
+                # Don't fail hard - restack can have non-critical warnings
+            else:
+                console.print("[dim]    ✓ Stack structure rebuilt[/dim]")
+        except subprocess.TimeoutExpired:
+            console.print("[yellow]  ⚠ gt restack timed out after 30 seconds[/yellow]")
+            # Continue anyway - restack failure is not critical
+
     def sync_graphite_stack(self, instance_path: Path) -> bool:
         """Sync Graphite metadata with actual git state.
 
@@ -1275,25 +1438,27 @@ class EpicOrchestrator:
         except Exception as e:
             console.print(f"[dim]    Could not check status: {e}[/dim]")
 
-        # Step 4: Run gt restack to rebuild stack structure based on current git state
-        console.print("[dim]  Running 'gt restack' to rebuild stack structure...[/dim]")
-        try:
-            restack_result = subprocess.run(
-                ["gt", "restack", "--no-interactive"],
-                cwd=str(instance_path),
-                capture_output=True,
-                text=True,
-                timeout=30  # 30 second timeout for restack
-            )
+        # Step 4: Check for active worktrees before running restack
+        console.print("[dim]  Checking for active worktrees...[/dim]")
+        worktree_branches = self._get_worktree_branches(instance_path)
 
-            if restack_result.returncode != 0:
-                console.print(f"[yellow]  ⚠ gt restack had issues: {restack_result.stderr}[/yellow]")
-                # Don't fail hard - restack can have non-critical warnings
+        if worktree_branches:
+            # Filter out the main worktree entry (usually just shows the main branch)
+            issue_branches = [b for b in worktree_branches if b.startswith('issue-')]
+
+            if issue_branches:
+                console.print(f"[yellow]  ⚠ Skipping restack: {len(issue_branches)} branch(es) checked out in worktrees[/yellow]")
+                console.print(f"[dim]    Branches: {', '.join(issue_branches[:5])}{', ...' if len(issue_branches) > 5 else ''}[/dim]")
+                console.print("[dim]    Run restack in individual worktrees instead if needed[/dim]")
+                # Skip restack step entirely to avoid git worktree conflicts
             else:
-                console.print("[dim]    ✓ Stack structure rebuilt[/dim]")
-        except subprocess.TimeoutExpired:
-            console.print("[yellow]  ⚠ gt restack timed out after 30 seconds[/yellow]")
-            # Continue anyway - restack failure is not critical
+                # No issue branches in worktrees, safe to restack
+                console.print("[dim]    No issue branches in worktrees, safe to restack[/dim]")
+                self._run_restack(instance_path)
+        else:
+            # No worktrees at all, safe to restack
+            console.print("[dim]    No worktrees found, safe to restack[/dim]")
+            self._run_restack(instance_path)
 
         # Step 5: Verify stack structure
         console.print("[dim]  Verifying stack structure...[/dim]")
@@ -1345,6 +1510,38 @@ class EpicOrchestrator:
             return False
 
         instance_path = Path(f"/opt/{instance_name}")
+
+        # Discover PRs from GitHub before syncing (Issue #2 fix)
+        console.print("[blue]Discovering PRs from GitHub...[/blue]")
+        existing_prs = self.get_existing_prs(instance_name)
+
+        if existing_prs:
+            console.print(f"[green]Found {len(existing_prs)} existing PRs from GitHub[/green]")
+
+            # Update plan with discovered PR numbers
+            updated_count = 0
+            for issue in plan.issues:
+                if issue.number in existing_prs:
+                    if not issue.pr_number:
+                        # New PR discovered
+                        issue.pr_number = existing_prs[issue.number]
+                        updated_count += 1
+                        console.print(f"[green]  ✓ Issue #{issue.number} → PR #{existing_prs[issue.number]}[/green]")
+                    elif issue.pr_number != existing_prs[issue.number]:
+                        # PR number changed (shouldn't happen, but handle it)
+                        console.print(f"[yellow]  ⚠ Issue #{issue.number}: PR number changed {issue.pr_number} → {existing_prs[issue.number]}[/yellow]")
+                        issue.pr_number = existing_prs[issue.number]
+                        updated_count += 1
+
+            if updated_count > 0:
+                console.print(f"[blue]Updated {updated_count} issue(s) with PR numbers[/blue]")
+                # Save updated plan
+                self._save_plan(plan)
+            else:
+                console.print("[dim]All issues already have correct PR numbers[/dim]")
+        else:
+            console.print("[yellow]No PRs found on GitHub for this epic[/yellow]")
+
         all_success = True
         synced_count = 0
         skipped_count = 0
@@ -1369,9 +1566,11 @@ class EpicOrchestrator:
             console.print(f"\n[blue]Syncing PR #{issue.pr_number} (issue {issue.number})...[/blue]")
 
             try:
-                # Run gt submit --no-edit --no-interactive to register PR with Graphite
+                # Register PR with Graphite backend
+                # Use --force to override "updated remotely" checks and skip permission issues
+                # We're just registering existing PRs, not making code changes
                 result = subprocess.run(
-                    ["gt", "submit", "--no-edit", "--no-interactive"],
+                    ["gt", "submit", "--no-edit", "--no-interactive", "--force"],
                     cwd=str(worktree_path),
                     capture_output=True,
                     text=True,

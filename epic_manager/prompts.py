@@ -13,6 +13,17 @@ CURRENT CONTEXT:
 - Worktree: {worktree_path}
 - Issue: #{issue_number}
 
+IMPORTANT: SEQUENTIAL EXECUTION FOR PROPER PR STACKING
+This workflow is part of a dependency chain where PRs must be created sequentially
+to ensure correct Graphite stacking. The parent issue's PR must exist on GitHub
+BEFORE this issue creates its PR. Epic Manager handles the sequencing - your job
+is to complete the TDD workflow and create the PR via 'gt submit'. Epic Manager
+will verify the PR exists before starting dependent issues.
+
+Why this matters: Graphite determines PR base branches from git ancestry. If a
+parent PR doesn't exist when 'gt submit' runs, Graphite falls back to targeting
+main, breaking the stack. Sequential execution prevents this.
+
 WORKFLOW STEPS:
 
 1. SYNC GRAPHITE STACK:
@@ -185,16 +196,25 @@ WORKFLOW STEPS:
    - Confirm ALL tests passing: pytest
    - Confirm PR created and linked to issue
 
-11.5. CLEANUP TEMPORARY FILES:
-   - Remove any temporary helper scripts created during development
-   - Common patterns: verify_*.py, test_*.tmp, debug_*.py, temp_*.py
+11.5. CLEANUP AND COMMIT ALL FILES:
    - Run: git status --short
-   - If any uncommitted files exist that aren't part of the implementation:
-     * Review each file to determine if it's temporary or part of the feature
-     * Delete temporary/helper files: rm <filename>
-     * Commit legitimate files if they're part of the feature implementation
-   - Final check: git status --short should show NOTHING (or only .gitignore-d files)
-   - This ensures the worktree is clean and the workflow is complete
+   - Review ALL uncommitted files:
+
+   **DELETE temporary helper scripts**:
+   - Patterns: verify_*.py, test_*.tmp, debug_*.py, temp_*.py
+   - Run: rm <filename>
+
+   **COMMIT test documentation** (REQUIRED if created):
+   - Files like: RUN_TESTS_*.md, TEST_SUMMARY_*.md, *_tdd_plan.md
+   - These are LEGITIMATE documentation that MUST be committed
+   - Run: git add tests/*.md && git commit -m "docs(#{issue_number}): Add test documentation"
+
+   **COMMIT any other implementation files**:
+   - New source files, config files, or documentation
+   - Run: git add <files> && git commit -m "appropriate message"
+
+   - **CRITICAL**: Final check: git status --short should show NOTHING
+   - This ensures the worktree is clean and the workflow validation will pass
 
 COMPLETION CRITERIA (ALL must be true):
 - ✓ Schema discovery completed with all field names documented
