@@ -161,18 +161,28 @@ class ReviewMonitor:
 
             prs_data = json.loads(result.stdout)
 
-            # Match PRs to issues by branch name
+            # Match PRs to issues by branch name and auto-publish drafts
             for pr in prs_data:
                 pr_number = pr["number"]
                 branch_name = pr["headRefName"]
+                is_draft = pr.get("isDraft", False)
 
                 # Check if branch matches issue-NNN pattern
                 match = re.match(r'issue-(\d+)', branch_name)
                 if match:
                     issue_num = int(match.group(1))
                     if issue_num in issue_numbers:
-                        issue_to_pr[issue_num] = pr_number
-                        console.print(f"[green]  Issue #{issue_num} → PR #{pr_number} ({branch_name})[/green]")
+                        if is_draft:
+                            # Auto-publish draft PRs to enable CodeRabbit review
+                            console.print(f"[yellow]  Issue #{issue_num} → PR #{pr_number} ({branch_name}) [DRAFT - publishing...][/yellow]")
+                            published = await self._publish_draft_pr(pr_number, instance_path)
+                            if published:
+                                issue_to_pr[issue_num] = pr_number
+                            else:
+                                console.print(f"[red]  Failed to publish PR #{pr_number}, skipping[/red]")
+                        else:
+                            issue_to_pr[issue_num] = pr_number
+                            console.print(f"[green]  Issue #{issue_num} → PR #{pr_number} ({branch_name}) [READY][/green]")
 
             if not issue_to_pr:
                 console.print(f"[yellow]No PRs found for epic issues[/yellow]")
@@ -214,6 +224,36 @@ class ReviewMonitor:
 
         except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError) as e:
             console.print(f"[dim]Error checking PR #{pr_number}: {e}[/dim]")
+            return False
+
+    async def _publish_draft_pr(self, pr_number: int, instance_path: Path) -> bool:
+        """Publish a draft PR to make it ready for review.
+
+        CodeRabbit cannot review draft PRs, so we must ensure all PRs are published.
+
+        Args:
+            pr_number: PR number to publish
+            instance_path: Path to the instance repository
+
+        Returns:
+            True if PR was published successfully, False otherwise
+        """
+        try:
+            console.print(f"[yellow]Publishing draft PR #{pr_number} to enable CodeRabbit review...[/yellow]")
+
+            result = subprocess.run([
+                self.gh_command, "pr", "ready", str(pr_number)
+            ], capture_output=True, text=True, cwd=str(instance_path))
+
+            if result.returncode != 0:
+                console.print(f"[red]Failed to publish PR #{pr_number}: {result.stderr}[/red]")
+                return False
+
+            console.print(f"[green]✓ PR #{pr_number} is now published and ready for review[/green]")
+            return True
+
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            console.print(f"[red]Error publishing PR #{pr_number}: {e}[/red]")
             return False
 
     async def _count_coderabbit_comments(self, pr_number: int, instance_path: Path) -> int:
@@ -272,8 +312,8 @@ class ReviewMonitor:
         poll_count = 0
 
         # Get epic number from plan if not provided
-        if epic_number is None and hasattr(plan, 'epic_number'):
-            epic_number = plan.epic_number
+        if epic_number is None and hasattr(plan, 'epic'):
+            epic_number = plan.epic.number
 
         console.print(f"[dim]Polling every {self.poll_interval} seconds...[/dim]")
         console.print(f"[dim]Max fix attempts per PR: {Constants.MAX_FIX_ATTEMPTS}[/dim]\n")

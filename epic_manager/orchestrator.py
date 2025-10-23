@@ -500,14 +500,14 @@ class EpicOrchestrator:
         try:
             monitor = ReviewMonitor()
             instance_path = Path(f"/opt/{plan.epic.instance}")
-            await monitor.monitor_epic_reviews(plan, worktrees, instance_path)
+            await monitor.monitor_epic_reviews(plan, worktrees, instance_path, epic_number=plan.epic.number)
         except asyncio.CancelledError:
             console.print("[yellow]Review monitoring stopped[/yellow]")
         except Exception as e:
             console.print(f"[red]Review monitoring error: {e}[/red]")
 
     def get_existing_prs(self, instance_name: str) -> Dict[int, int]:
-        """Get existing PRs for issue branches.
+        """Get existing PRs for issue branches and auto-publish drafts.
 
         Args:
             instance_name: KB-LLM instance name
@@ -525,7 +525,7 @@ class EpicOrchestrator:
 
         try:
             result = subprocess.run(
-                ["gh", "pr", "list", "--json", "number,headRefName"],
+                ["gh", "pr", "list", "--json", "number,headRefName,isDraft"],
                 cwd=str(instance_path),
                 capture_output=True,
                 text=True,
@@ -539,7 +539,24 @@ class EpicOrchestrator:
                 if pr['headRefName'].startswith('issue-'):
                     try:
                         issue_number = int(pr['headRefName'].split('-')[1])
-                        prs[issue_number] = pr['number']
+                        pr_number = pr['number']
+                        is_draft = pr.get('isDraft', False)
+
+                        # Auto-publish draft PRs
+                        if is_draft:
+                            console.print(f"[yellow]PR #{pr_number} (issue {issue_number}) is draft, publishing...[/yellow]")
+                            publish_result = subprocess.run(
+                                ["gh", "pr", "ready", str(pr_number)],
+                                cwd=str(instance_path),
+                                capture_output=True,
+                                text=True
+                            )
+                            if publish_result.returncode == 0:
+                                console.print(f"[green]✓ PR #{pr_number} published[/green]")
+                            else:
+                                console.print(f"[yellow]⚠ Could not publish PR #{pr_number}: {publish_result.stderr}[/yellow]")
+
+                        prs[issue_number] = pr_number
                     except (ValueError, IndexError):
                         continue
 

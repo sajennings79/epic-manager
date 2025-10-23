@@ -160,13 +160,15 @@ WORKFLOW STEPS:
    - Verify ALL acceptance criteria from issue are implemented
    - Fix any linting or formatting issues found
 
-9. SUBMIT STACKED PR:
+9. SUBMIT STACKED PR (PUBLISHED, NOT DRAFT):
    - Review all commits: git log --oneline -10
    - Verify commit messages are clear and descriptive
-   - Create PR with Graphite:
-     gt submit --no-interactive \\
+   - Create PR with Graphite (MUST be published for CodeRabbit review):
+     gt submit --no-interactive --publish \\
        --title "Fix #{issue_number}: [Descriptive title from issue]" \\
        --body "## Summary\\n\\n[Detailed description of changes made]\\n\\n## Test Coverage\\n\\n[List all tests added and what they cover]\\n\\n## Stack Position\\n\\n[Describe if this is part of an epic and any dependencies]\\n\\nFixes #{issue_number}"
+   - **CRITICAL**: PR must be published (ready for review), NOT draft
+   - **WHY**: CodeRabbit cannot review draft PRs. Use --publish flag.
    - Capture PR number from output
 
 10. VERIFY PR BASE BRANCH AND GRAPHITE REGISTRATION:
