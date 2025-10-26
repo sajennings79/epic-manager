@@ -54,7 +54,7 @@ class ClaudeSessionManager:
         epic_number: int,
         instance_name: str
     ) -> str:
-        """Request epic plan JSON from Claude using centralized prompt.
+        """Request epic plan JSON from Claude using epic-planning skill.
 
         Args:
             instance_path: Path to the KB-LLM instance repository
@@ -62,15 +62,13 @@ class ClaudeSessionManager:
             instance_name: Name of the KB-LLM instance
 
         Returns:
-            JSON string from Claude's /epic-plan response
+            JSON string from Claude's response
 
         Raises:
             ImportError: If claude-agent-sdk is not installed
         """
         if ClaudeSDKClient is None:
             raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
-
-        from .prompts import EPIC_PLAN_PROMPT
 
         console.print(f"[green]Requesting epic plan for epic {epic_number}[/green]")
         console.print(f"[blue]Instance: {instance_path}[/blue]")
@@ -81,11 +79,8 @@ class ClaudeSessionManager:
             permission_mode='bypassPermissions'
         )
 
-        # Create prompt for epic analysis using centralized template
-        prompt = EPIC_PLAN_PROMPT.format(
-            epic_number=epic_number,
-            instance_name=instance_name
-        )
+        # Minimal prompt - Claude will discover epic-planning skill
+        prompt = f"Analyze epic #{epic_number} for instance '{instance_name}' and create execution plan with dependencies"
 
         response_parts = []
         try:
@@ -349,9 +344,9 @@ class ClaudeSessionManager:
         worktree_path: Path,
         issue_number: int
     ) -> WorkflowResult:
-        """Launch Claude Code TDD workflow for an issue using explicit prompt.
+        """Launch Claude Code TDD workflow for an issue using tdd-graphite-workflow skill.
 
-        Replaces /graphite-tdd slash command with self-contained workflow prompt.
+        Claude discovers the skill from worktree/.claude/skills/ and executes autonomously.
         Includes validation to detect silent failures and PR number extraction.
 
         Args:
@@ -367,8 +362,6 @@ class ClaudeSessionManager:
         if ClaudeSDKClient is None:
             raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
 
-        from .prompts import TDD_WORKFLOW_PROMPT, TDD_SYSTEM_PROMPT
-
         console.print(f"[green]Launching TDD workflow for issue {issue_number}[/green]")
         console.print(f"[blue]Worktree: {worktree_path}[/blue]")
 
@@ -377,17 +370,13 @@ class ClaudeSessionManager:
         full_output = []  # Collect all output for PR number extraction
 
         try:
-            # Create explicit TDD workflow prompt
-            prompt = TDD_WORKFLOW_PROMPT.format(
-                issue_number=issue_number,
-                worktree_path=worktree_path
-            )
+            # Minimal prompt - Claude will discover tdd-graphite-workflow skill
+            prompt = f"Execute TDD workflow for GitHub issue #{issue_number}"
 
-            # Configure Claude for TDD workflow with centralized system prompt
+            # Configure Claude for TDD workflow - skills are in worktree/.claude/skills/
             options = ClaudeAgentOptions(
                 cwd=str(worktree_path),
-                permission_mode='bypassPermissions',
-                system_prompt=TDD_SYSTEM_PROMPT
+                permission_mode='bypassPermissions'
             )
 
             async with ClaudeSDKClient(options=options) as client:
@@ -630,9 +619,9 @@ class ClaudeSessionManager:
         worktree_path: Path,
         pr_number: int
     ) -> WorkflowResult:
-        """Launch Claude Code to fix CodeRabbit review comments using explicit workflow.
+        """Launch Claude Code to fix CodeRabbit review comments using review-fixer skill.
 
-        Replaces generic prompt with detailed CodeRabbit review fixing workflow.
+        Claude discovers the skill and executes the review fixing workflow autonomously.
 
         Args:
             worktree_path: Path to the review worktree
@@ -647,25 +636,18 @@ class ClaudeSessionManager:
         if ClaudeSDKClient is None:
             raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
 
-        from .prompts import REVIEW_FIX_PROMPT, REVIEW_FIX_SYSTEM_PROMPT
-
         console.print(f"[green]Launching CodeRabbit fixer for PR {pr_number}[/green]")
         console.print(f"[blue]Review worktree: {worktree_path}[/blue]")
 
-        # Create explicit review fixing prompt
-        prompt = REVIEW_FIX_PROMPT.format(
-            pr_number=pr_number,
-            worktree_path=worktree_path
-        )
+        # Minimal prompt - Claude will discover review-fixer skill
+        prompt = f"Fix CodeRabbit review comments for PR #{pr_number}"
 
-        # Use centralized system prompt to configure review fixing behavior
         start_time = datetime.now()
 
         try:
             options = ClaudeAgentOptions(
                 cwd=str(worktree_path),
-                permission_mode='bypassPermissions',
-                system_prompt=REVIEW_FIX_SYSTEM_PROMPT
+                permission_mode='bypassPermissions'
             )
 
             async with ClaudeSDKClient(options=options) as client:
@@ -763,224 +745,3 @@ class ClaudeSessionManager:
                 console.print(f"[dim]Received {type(message).__name__} in simple_query[/dim]")
 
         return "\n".join(response_parts)
-
-    async def run_schema_discovery(
-        self,
-        worktree_path: Path,
-        issue_number: int
-    ) -> str:
-        """Run schema discovery for an issue to document all model field names.
-
-        This prevents AttributeError bugs by ensuring field names are documented
-        before implementation begins.
-
-        Args:
-            worktree_path: Path to the worktree for the issue
-            issue_number: Issue number for context
-
-        Returns:
-            Schema reference documentation string
-
-        Raises:
-            ImportError: If claude-agent-sdk is not installed
-        """
-        if ClaudeSDKClient is None:
-            raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
-
-        from .prompts import SCHEMA_DISCOVERY_PROMPT
-
-        console.print(f"[green]Running schema discovery for issue {issue_number}[/green]")
-        console.print(f"[blue]Worktree: {worktree_path}[/blue]")
-
-        prompt = SCHEMA_DISCOVERY_PROMPT.format(issue_number=issue_number)
-
-        options = ClaudeAgentOptions(
-            cwd=str(worktree_path),
-            permission_mode='bypassPermissions'
-        )
-
-        response_parts = []
-
-        try:
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(prompt)
-
-                async for message in client.receive_response():
-                    if isinstance(message, dict):
-                        if message.get("type") == "text":
-                            response_parts.append(message.get("text", ""))
-                    elif isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                response_parts.append(block.text)
-                    elif isinstance(message, SystemMessage):
-                        pass  # Skip system messages
-                    elif isinstance(message, UserMessage):
-                        pass  # Skip user messages
-                    elif isinstance(message, ResultMessage):
-                        if message.result:
-                            response_parts.append(message.result)
-
-            schema_reference = "\n".join(response_parts)
-
-            if not schema_reference.strip():
-                console.print("[yellow]Warning: Empty schema reference returned[/yellow]")
-                return ""
-
-            console.print(f"[green]Schema discovery completed ({len(schema_reference)} chars)[/green]")
-            return schema_reference
-
-        except Exception as e:
-            console.print(f"[red]Schema discovery failed: {e}[/red]")
-            return ""
-
-    async def run_schema_compliance_check(
-        self,
-        worktree_path: Path,
-        issue_number: int,
-        schema_reference: str
-    ) -> bool:
-        """Run schema compliance check to verify field names match schema.
-
-        Args:
-            worktree_path: Path to the worktree
-            issue_number: Issue number for context
-            schema_reference: Schema reference from discovery phase
-
-        Returns:
-            True if compliance check passed, False if violations found
-
-        Raises:
-            ImportError: If claude-agent-sdk is not installed
-        """
-        if ClaudeSDKClient is None:
-            raise ImportError("claude-agent-sdk not installed. Install with: pip install claude-agent-sdk")
-
-        from .prompts import SCHEMA_COMPLIANCE_CHECK_PROMPT
-
-        console.print(f"[blue]Running schema compliance check for issue {issue_number}[/blue]")
-
-        prompt = SCHEMA_COMPLIANCE_CHECK_PROMPT.format(
-            issue_number=issue_number,
-            schema_reference=schema_reference
-        )
-
-        options = ClaudeAgentOptions(
-            cwd=str(worktree_path),
-            permission_mode='bypassPermissions'
-        )
-
-        response_parts = []
-        violations_found = False
-
-        try:
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(prompt)
-
-                async for message in client.receive_response():
-                    if isinstance(message, dict):
-                        if message.get("type") == "text":
-                            text = message.get("text", "")
-                            response_parts.append(text)
-                            # Check for violation indicators
-                            if "VIOLATION" in text or "BLOCKER" in text:
-                                violations_found = True
-                    elif isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                response_parts.append(block.text)
-                                if "VIOLATION" in block.text or "BLOCKER" in block.text:
-                                    violations_found = True
-                    elif isinstance(message, SystemMessage):
-                        pass  # Skip system messages
-                    elif isinstance(message, UserMessage):
-                        pass  # Skip user messages
-                    elif isinstance(message, ResultMessage):
-                        if message.result:
-                            response_parts.append(message.result)
-
-            response = "\n".join(response_parts)
-
-            if violations_found:
-                console.print("[red]Schema compliance check FAILED - violations found[/red]")
-                console.print(response)
-                return False
-            else:
-                console.print("[green]Schema compliance check PASSED[/green]")
-                return True
-
-        except Exception as e:
-            console.print(f"[red]Schema compliance check error: {e}[/red]")
-            return False
-
-    async def check_integration_test_coverage(
-        self,
-        worktree_path: Path,
-        issue_number: int
-    ) -> bool:
-        """Check if integration test coverage meets minimum 20% requirement.
-
-        Args:
-            worktree_path: Path to the worktree
-            issue_number: Issue number for context
-
-        Returns:
-            True if coverage requirement met, False otherwise
-        """
-        import subprocess
-        import re
-
-        console.print(f"[blue]Checking integration test coverage for issue {issue_number}[/blue]")
-
-        try:
-            # Count total tests
-            result = subprocess.run(
-                ["pytest", f"tests/issue_{issue_number}_*", "--collect-only", "-q"],
-                cwd=str(worktree_path),
-                capture_output=True,
-                text=True
-            )
-
-            if result.returncode != 0:
-                console.print(f"[yellow]Could not collect tests: {result.stderr}[/yellow]")
-                return False
-
-            # Parse test count from output
-            total_match = re.search(r"(\d+) test", result.stdout)
-            if not total_match:
-                console.print("[yellow]Could not determine total test count[/yellow]")
-                return False
-
-            total_tests = int(total_match.group(1))
-
-            # Count integration tests
-            result = subprocess.run(
-                ["pytest", f"tests/issue_{issue_number}_*", "-m", "integration", "--collect-only", "-q"],
-                cwd=str(worktree_path),
-                capture_output=True,
-                text=True
-            )
-
-            integration_match = re.search(r"(\d+) test", result.stdout)
-            integration_tests = int(integration_match.group(1)) if integration_match else 0
-
-            # Calculate percentage
-            if total_tests == 0:
-                console.print("[yellow]No tests found[/yellow]")
-                return False
-
-            percentage = (integration_tests / total_tests) * 100
-
-            console.print(f"[blue]Total tests: {total_tests}, Integration: {integration_tests} ({percentage:.1f}%)[/blue]")
-
-            if percentage >= 20:
-                console.print(f"[green]✓ Integration test coverage: {percentage:.1f}% (meets 20% minimum)[/green]")
-                return True
-            else:
-                console.print(f"[red]✗ Integration test coverage: {percentage:.1f}% (below 20% minimum)[/red]")
-                console.print("[yellow]Add more @pytest.mark.integration tests[/yellow]")
-                return False
-
-        except Exception as e:
-            console.print(f"[yellow]Error checking integration test coverage: {e}[/yellow]")
-            return False

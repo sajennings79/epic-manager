@@ -79,6 +79,177 @@ flake8 epic_manager/ tests/
 
 **Important**: Always run `black` and `isort` before committing changes.
 
+## Claude Code Skills Architecture
+
+Epic Manager uses **Claude Code Skills** to define development workflows as discoverable, git-tracked methodologies. Skills replace monolithic Python prompts with modular, maintainable markdown files.
+
+### What Are Skills?
+
+Skills are packages of expertise that Claude discovers autonomously based on the user's request. Each skill contains:
+- `SKILL.md`: Main skill definition with YAML frontmatter and workflow steps
+- Supporting `.md` files: Referenced documentation (e.g., `schema-discovery.md`, `integration-tests.md`)
+
+**Key advantages**:
+- **Git-tracked**: Skills evolve with the codebase, versioned in `.claude/skills/`
+- **Discoverable**: Claude autonomously selects appropriate skills based on context
+- **Modular**: Small, focused skills can reference each other
+- **Team-shared**: Anyone pulling the repo gets latest workflow improvements
+- **User-visible**: Skills are markdown files users can read/modify directly
+
+### Available Skills
+
+Epic Manager provides 4 primary skills provisioned into every worktree:
+
+#### 1. **tdd-graphite-workflow** (380 lines)
+Complete TDD workflow for issue implementation with Graphite stacked PRs.
+
+**Triggers**: "TDD workflow", "implement issue", "run TDD", "develop feature"
+
+**Key features**:
+- 11-step workflow from analysis through PR submission
+- Schema discovery to prevent field name bugs
+- Integration test requirements (minimum 20%)
+- Graphite stack synchronization and PR verification
+- Published PRs for CodeRabbit review
+
+**Supporting files**:
+- `schema-discovery.md`: Field name documentation methodology
+- `integration-tests.md`: 20% integration test requirement details
+- `schema-compliance.md`: Field validation process
+- `graphite-commands.md`: Complete `gt` CLI reference
+
+#### 2. **epic-planning** (383 lines)
+Analyzes GitHub epics and creates JSON execution plans with dependency chains.
+
+**Triggers**: "analyze epic", "epic plan", "create plan for epic"
+
+**Key features**:
+- Extracts dependencies from epic description
+- Determines base branches for git worktrees
+- Identifies parallelization opportunities
+- Returns structured JSON for epic orchestration
+
+**Supporting files**:
+- `dependency-analysis.md`: Advanced dependency patterns
+
+#### 3. **review-fixer** (388 lines)
+Addresses CodeRabbit review comments systematically.
+
+**Triggers**: "fix review", "address review comments", "CodeRabbit feedback"
+
+**Key features**:
+- Fetches and prioritizes review comments by severity
+- Implements fixes with tests
+- Verifies PR base branches after changes
+- Updates PR with summary of fixes
+
+**Supporting files**:
+- `pr-verification.md`: Base branch verification after review
+
+#### 4. **pr-submission** (311 lines)
+Creates PRs via Graphite with proper stacking and backend registration.
+
+**Triggers**: "submit PR", "create PR", "publish PR"
+
+**Key features**:
+- Ensures Graphite backend registration (required for web UI)
+- Verifies base branches match stack structure
+- Publishes PRs for CodeRabbit review
+- Validates stack integrity
+
+**Supporting files**:
+- `stack-verification.md`: Base branch verification details
+
+### Skill Provisioning Workflow
+
+When epic-manager creates a worktree, skills are automatically provisioned:
+
+```python
+def install_skills_to_worktree(worktree_path, instance_path):
+    """
+    Merge strategy:
+    1. Copy epic-manager skills (base layer) from /opt/epic-manager/.claude/skills/
+    2. Copy KB-LLM instance skills (if exist) from instance/.claude/skills/
+    3. Result: worktree/.claude/skills/ contains both
+    """
+```
+
+**Example**:
+```
+Worktree creation for issue 581:
+  ✓ Creating git worktree at /opt/work/feature-epic-580/issue-581
+  ✓ Tracking branch 'issue-581' in Graphite
+  ✓ Installing epic-manager skills...
+  ✓ Installed 4 epic-manager skill(s)
+  ✓ Merged KB-LLM instance skills (if any)
+```
+
+**Result**: Claude running in the worktree discovers skills from `.claude/skills/` and executes workflows autonomously.
+
+### Customizing Workflows
+
+Skills are editable markdown files - modify them for project-specific needs:
+
+#### Option 1: Edit Epic-Manager Skills (Global Changes)
+```bash
+# Edit the TDD workflow for all future epics
+vim /opt/epic-manager/.claude/skills/tdd-graphite-workflow/SKILL.md
+
+# Changes apply to new worktrees (existing worktrees use snapshot from creation)
+```
+
+#### Option 2: Add KB-LLM Instance Skills (Project-Specific)
+```bash
+# Create instance-specific skills
+mkdir -p /opt/feature/.claude/skills/kb-llm-custom/
+vim /opt/feature/.claude/skills/kb-llm-custom/SKILL.md
+
+# These merge with epic-manager skills in every worktree
+```
+
+#### Option 3: Override Epic-Manager Skills
+If KB-LLM instance has a skill with the same name as epic-manager, the instance version takes precedence (copied last in merge).
+
+### Skill Discovery Process
+
+When Claude receives a request in a worktree:
+
+1. **Discovers skills** from `worktree/.claude/skills/` (epic-manager + instance skills merged)
+2. **Matches request** to skill descriptions (e.g., "implement issue" → `tdd-graphite-workflow`)
+3. **Invokes skill** autonomously with appropriate context
+4. **References supporting files** as needed (progressive disclosure)
+
+**Example**:
+```
+User request: "Execute TDD workflow for issue #581"
+          ↓
+Claude discovers: tdd-graphite-workflow skill
+          ↓
+Executes: 11-step TDD workflow from SKILL.md
+          ↓
+References: schema-discovery.md (step 4.5), integration-tests.md (step 5)
+```
+
+### Migration from Prompts
+
+Epic Manager has **fully migrated** from Python prompt templates to skills:
+
+**Before (prompt-based)**:
+- 745 lines of Python strings in `prompts.py`
+- Hardcoded in codebase, requires code changes to modify
+- Not visible to users without reading Python
+
+**After (skills-based)**:
+- 3,293 lines of structured markdown in `.claude/skills/`
+- Git-tracked, editable without code changes
+- Visible and modifiable by all users
+- Modular and composable
+
+**Code impact**:
+- Deleted: `epic_manager/prompts.py` (745 lines)
+- Simplified: `claude_automation.py` methods now send minimal prompts
+- Added: `workspace_manager.install_skills_to_worktree()` for provisioning
+
 ## Architecture
 
 ### Execution Model: Chain-Based Sequential Stacking

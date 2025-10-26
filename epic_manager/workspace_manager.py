@@ -5,6 +5,7 @@ Simplified git worktree management for parallel development.
 Provides core functions: create, list, and cleanup worktrees.
 """
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -178,11 +179,63 @@ class WorkspaceManager:
             # Optional: Track in Graphite for stack operations
             self._track_in_graphite(worktree_path, branch_name, base_branch)
 
+            # Install epic-manager skills into worktree
+            self.install_skills_to_worktree(worktree_path, base_repo)
+
             return worktree_path
 
         except subprocess.CalledProcessError as e:
             console.print(f"[red]Failed to create worktree: {e.stderr}[/red]")
             raise
+
+    def install_skills_to_worktree(
+        self,
+        worktree_path: Path,
+        instance_path: Path
+    ) -> None:
+        """
+        Provision epic-manager skills + KB-LLM instance skills into worktree.
+
+        Merge strategy:
+        1. Copy epic-manager skills (base layer)
+        2. Copy KB-LLM instance skills (additive, preserves both)
+
+        Args:
+            worktree_path: Worktree to provision
+            instance_path: KB-LLM instance path (e.g., /opt/feature)
+        """
+        worktree_skills_dir = worktree_path / ".claude" / "skills"
+        worktree_skills_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 1: Copy epic-manager skills
+        epic_mgr_skills = Path(__file__).parent.parent / ".claude" / "skills"
+        if epic_mgr_skills.exists():
+            console.print(f"[dim]Installing epic-manager skills...[/dim]")
+            try:
+                shutil.copytree(
+                    epic_mgr_skills,
+                    worktree_skills_dir,
+                    dirs_exist_ok=True
+                )
+                # Count skills installed
+                skill_count = len(list(worktree_skills_dir.iterdir()))
+                console.print(f"[green]✓ Installed {skill_count} epic-manager skill(s)[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not install epic-manager skills: {e}[/yellow]")
+
+        # Step 2: Merge KB-LLM instance skills (if they exist)
+        instance_skills = instance_path / ".claude" / "skills"
+        if instance_skills.exists():
+            console.print(f"[dim]Merging KB-LLM instance skills...[/dim]")
+            try:
+                shutil.copytree(
+                    instance_skills,
+                    worktree_skills_dir,
+                    dirs_exist_ok=True
+                )
+                console.print(f"[green]✓ Merged KB-LLM instance skills[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not merge instance skills: {e}[/yellow]")
 
     def create_or_reuse_worktree(
         self,
@@ -260,6 +313,8 @@ class WorkspaceManager:
                 # Has commits - check if clean
                 if self.is_worktree_clean(worktree_path):
                     console.print(f"[blue]Reusing existing worktree with {commit_count} commit(s)[/blue]")
+                    # Ensure skills are installed (in case worktree was created before skills)
+                    self.install_skills_to_worktree(worktree_path, base_repo)
                     return worktree_path
                 else:
                     raise ValueError(
